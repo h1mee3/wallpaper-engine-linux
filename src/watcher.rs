@@ -1,12 +1,10 @@
-use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::daemon::DaemonState;
 use crate::discovery::Discovery;
@@ -19,14 +17,26 @@ impl SteamWatcher {
         let mut config_files = Vec::new();
         let mut workshop_files = Vec::new();
 
+        let mut seen = std::collections::HashSet::new();
         let libs = Discovery::find_steam_libraries();
+
         for lib in libs {
+            if !lib.exists() {
+                continue;
+            }
+
+            // Canonicalize to deduplicate symlinks / mount points
+            let canon = lib.canonicalize().unwrap_or(lib);
+            if !seen.insert(canon.clone()) {
+                continue;
+            }
+
             // Official Wallpaper Engine config.json
-            let cfg = lib.join("steamapps/common/wallpaper_engine/config.json");
+            let cfg = canon.join("steamapps/common/wallpaper_engine/config.json");
             config_files.push(cfg);
 
             // Proton prefix configs
-            let pfx = lib.join("steamapps/compatdata/431960/pfx/drive_c/users");
+            let pfx = canon.join("steamapps/compatdata/431960/pfx/drive_c/users");
             if let Ok(users) = fs::read_dir(&pfx) {
                 for u in users.flatten() {
                     let path1 = u.path().join("AppData/Local/WallpaperEngine/config.json");
@@ -37,7 +47,7 @@ impl SteamWatcher {
             }
 
             // Workshop ACF file (updated when subscribing in Steam client)
-            let acf = lib.join("steamapps/workshop/appworkshop_431960.acf");
+            let acf = canon.join("steamapps/workshop/appworkshop_431960.acf");
             workshop_files.push(acf);
         }
 
@@ -90,9 +100,9 @@ impl SteamWatcher {
     /// Start the background watcher loop
     pub fn start(state: Arc<Mutex<DaemonState>>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let mut mtimes: HashMap<PathBuf, SystemTime> = HashMap::new();
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
-            let mut initialized = false;
+            let mut last_acf_mtime = std::time::SystemTime::UNIX_EPOCH;
+            let mut last_applied_paths: HashMap<String, PathBuf> = HashMap::new();
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(1500));
 
             debug!("Steam and config.json watcher started");
 
@@ -101,63 +111,53 @@ impl SteamWatcher {
 
                 let (config_targets, workshop_targets) = Self::get_watch_targets();
 
-                // 1. Check for Steam Workshop updates (new subscriptions)
+                // 1. Check for Steam Workshop updates (new subscriptions in Steam client)
                 for acf in workshop_targets {
                     if let Ok(meta) = fs::metadata(&acf) {
                         if let Ok(mtime) = meta.modified() {
-                            let prev = mtimes.get(&acf).copied();
-                            if initialized && prev.map_or(false, |p| mtime > p) {
+                            if mtime > last_acf_mtime && last_acf_mtime != std::time::SystemTime::UNIX_EPOCH {
                                 info!("Detected Steam Workshop changes in {:?}", acf);
                                 let mut s = state.lock().await;
                                 s.rescan();
                             }
-                            mtimes.insert(acf, mtime);
+                            last_acf_mtime = mtime;
                         }
                     }
                 }
 
                 // 2. Check for Wallpaper Engine config.json changes (selected in official UI)
                 for cfg in config_targets {
-                    if let Ok(meta) = fs::metadata(&cfg) {
-                        if let Ok(mtime) = meta.modified() {
-                            let prev = mtimes.get(&cfg).copied();
-                            let should_trigger = if initialized {
-                                prev.map_or(true, |p| mtime > p)
-                            } else {
-                                // On first startup, read existing config.json
-                                true
-                            };
+                    if !cfg.exists() {
+                        continue;
+                    }
 
-                            if should_trigger {
-                                info!("Reading Wallpaper Engine config from {:?}", cfg);
-                                if let Ok(content) = fs::read_to_string(&cfg) {
-                                    let selections = Self::parse_config_json(&content);
-                                    for (_mon, path) in selections {
-                                        info!("Steam app selected wallpaper: {:?}", path);
-                                        let id_opt = path
-                                            .parent()
-                                            .and_then(|p| p.file_name())
+                    if let Ok(content) = fs::read_to_string(&cfg) {
+                        let selections = Self::parse_config_json(&content);
+                        for (mon, path) in selections {
+                            // Only trigger if this selection actually changed
+                            let prev = last_applied_paths.get(&mon);
+                            if prev != Some(&path) {
+                                info!("Steam Wallpaper Engine selected new wallpaper for {}: {:?}", mon, path);
+                                last_applied_paths.insert(mon, path.clone());
+
+                                let id_opt = path
+                                    .parent()
+                                    .and_then(|p| p.file_name())
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .or_else(|| {
+                                        path.file_name()
                                             .map(|s| s.to_string_lossy().to_string())
-                                            .or_else(|| {
-                                                path.file_name()
-                                                    .map(|s| s.to_string_lossy().to_string())
-                                            });
+                                    });
 
-                                        if let Some(id) = id_opt {
-                                            let mut s = state.lock().await;
-                                            let _ = s.apply_by_query(&id, None).await;
-                                        }
-                                    }
+                                if let Some(id) = id_opt {
+                                    let mut s = state.lock().await;
+                                    let _ = s.apply_by_query(&id, None).await;
                                 }
                             }
-                            mtimes.insert(cfg, mtime);
                         }
                     }
                 }
-
-                initialized = true;
             }
         })
     }
-
 }
