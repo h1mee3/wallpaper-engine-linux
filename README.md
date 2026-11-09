@@ -7,6 +7,14 @@ A high-performance, native Linux layer written in **Rust** to run **Steam Wallpa
 ## ✨ Features
 
 - **🦀 Pure Rust Core & Daemon**: Blazing fast, zero memory footprint, rock-solid asynchronous daemon built with Tokio and Unix Domain Sockets.
+- **🖼️ Native Wayland `wlr-layer-shell` Backend**:
+  - Operates strictly on `Layer level 0 (background)` via `zwlr_layer_surface_v1`.
+  - True compositor desktop background: rendered completely behind all tiled windows, floating windows, and desktop widgets.
+  - Zero window rules or opacity hacks needed; user applications enjoy 100% unobstructed visibility and full input focus.
+  - Exact display geometry and resolution fitting (`1920x1080 @ 200Hz`), supporting `fill`, `fit`, and `stretch` scaling modes.
+- **🎮 Live Steam App Synchronization (`SteamWatcher`)**:
+  - Live inotify watcher tracking Steam's Wallpaper Engine `config.json` and `appworkshop_431960.acf`.
+  - Pick or change wallpapers directly inside the official Steam Wallpaper Engine application GUI or Workshop; `wengine` detects the selection instantly and applies it in real-time.
 - **🔍 Steam & Workshop Auto-Discovery**:
   - Automatically parses Valve's VDF (`libraryfolders.vdf`, `appmanifest_431960.acf`).
   - Scans Steam libraries across all storage drives (`~/.local/share/Steam`, `/hdd/SteamLibrary`, `/run/media/...`).
