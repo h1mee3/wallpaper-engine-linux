@@ -194,6 +194,7 @@ impl Daemon {
                         if let Ok(mons) = Hyprland::get_monitors() {
                             s.monitors = mons;
                         }
+                        Hyprland::setup_window_rules();
                     }
                     HyprEvent::MonitorRemoved(name) => {
                         info!("Monitor disconnected: {}", name);

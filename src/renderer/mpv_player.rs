@@ -63,8 +63,26 @@ impl MpvInstance {
         self.y = y;
     }
 
-    /// Ensure MPV background process is running with IPC socket and exact display resolution
-    pub fn ensure_running(&mut self) -> Result<()> {
+    pub fn find_layer_player_bin() -> PathBuf {
+        if let Some(home) = dirs::home_dir() {
+            let p = home.join(".local/bin/wengine-layer-player");
+            if p.exists() {
+                return p;
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let p = parent.join("wengine-layer-player");
+                if p.exists() {
+                    return p;
+                }
+            }
+        }
+        PathBuf::from("wengine-layer-player")
+    }
+
+    /// Ensure native Wayland Layer Shell backend is running with IPC socket and exact display resolution
+    pub fn ensure_running(&mut self, initial_file: Option<&Path>) -> Result<()> {
         if self.is_alive() {
             return Ok(());
         }
@@ -75,82 +93,40 @@ impl MpvInstance {
         }
 
         info!(
-            "Spawning MPV wallpaper backend for monitor {} (resolution: {}x{} at +{}+{})",
+            "Spawning native Wayland Layer Shell wallpaper backend for monitor {} (resolution: {}x{} at +{}+{})",
             self.monitor, self.width, self.height, self.x, self.y
         );
 
-        let app_id = format!("wengine-bg-{}", self.monitor);
-        let socket_arg = format!("--input-ipc-server={}", self.socket_path.to_string_lossy());
-        let app_id_arg = format!("--wayland-app-id={}", app_id);
-        let title_arg = format!("--title={}", app_id);
-        let volume_arg = format!("--volume={}", self.volume);
+        let bin_path = Self::find_layer_player_bin();
+        let socket_str = self.socket_path.to_string_lossy().to_string();
+        let file_arg = initial_file
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
 
-        // Exact resolution, autofit, and display binding
-        let geom_arg = format!(
-            "--geometry={}x{}+{}+{}",
-            self.width, self.height, self.x, self.y
-        );
-        let autofit_arg = format!("--autofit={}x{}", self.width, self.height);
-        let screen_arg = format!("--screen-name={}", self.monitor);
-        let fs_screen_arg = format!("--fs-screen-name={}", self.monitor);
-
-        let panscan_arg = match self.scaling_mode {
-            ScalingMode::Fill => "--panscan=1.0",
-            ScalingMode::Fit => "--panscan=0.0",
-            ScalingMode::Stretch => "--panscan=0.0",
-        };
-        let keepaspect_arg = match self.scaling_mode {
-            ScalingMode::Stretch => "--keepaspect=no",
-            _ => "--keepaspect=yes",
-        };
-
-        let mut cmd = Command::new("mpv");
+        let mut cmd = Command::new(bin_path);
         cmd.args([
-            "--no-config",
-            "--idle=yes",
-            "--loop-file=inf",
-            "--hwdec=auto-safe",
-            "--no-audio",
-            "--no-osc",
-            "--no-osd-bar",
-            "--no-input-default-bindings",
-            "--no-stop-screensaver",
-            "--really-quiet",
-            "--keepaspect-window=no",
-            "--video-unscaled=no",
-            "--fullscreen",
-            "--force-window=yes",
-            "--ontop=no",
-            "--border=no",
-            &socket_arg,
-            &app_id_arg,
-            &title_arg,
-            &volume_arg,
-            &geom_arg,
-            &autofit_arg,
-            &screen_arg,
-            &fs_screen_arg,
-            panscan_arg,
-            keepaspect_arg,
+            &file_arg,
+            &self.monitor,
+            &socket_str,
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-        let child = cmd.spawn().context("Failed to spawn mpv process")?;
+        let child = cmd.spawn().context("Failed to spawn wengine-layer-player backend")?;
         self.process = Some(child);
 
-        // Wait up to 1.5s for the IPC socket to appear
-        for _ in 0..30 {
+        // Wait up to 2.5s for the IPC socket to appear
+        for _ in 0..50 {
             std::thread::sleep(std::time::Duration::from_millis(50));
             if self.socket_path.exists() {
-                debug!("MPV IPC socket ready at {:?}", self.socket_path);
+                debug!("Layer player IPC socket ready at {:?}", self.socket_path);
                 return Ok(());
             }
         }
 
         warn!(
-            "MPV process spawned but socket {:?} took long to create",
+            "Layer player spawned but socket {:?} took long to create",
             self.socket_path
         );
         Ok(())
@@ -190,22 +166,27 @@ impl MpvInstance {
 
     /// Load a video file seamlessly (gapless replace)
     pub async fn load_file(&mut self, path: &Path) -> Result<()> {
-        self.ensure_running()?;
+        let is_running = self.is_alive();
+        if !is_running {
+            self.ensure_running(Some(path))?;
+        }
 
         let path_str = path.to_string_lossy().to_string();
         info!("Loading video on monitor {}: {}", self.monitor, path_str);
 
-        let cmd = json!({
-            "command": ["loadfile", path_str, "replace"]
-        });
+        if is_running {
+            let cmd = json!({
+                "command": ["loadfile", path_str, "replace"]
+            });
+            self.send_command(cmd).await?;
+        }
 
-        self.send_command(cmd).await?;
         self.current_file = Some(path.to_path_buf());
         self.paused = false;
 
         // Apply audio & scaling settings
-        self.apply_audio().await?;
-        self.apply_scaling().await?;
+        let _ = self.apply_audio().await;
+        let _ = self.apply_scaling().await;
 
         Ok(())
     }

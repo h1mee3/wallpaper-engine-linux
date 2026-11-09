@@ -146,23 +146,18 @@ impl Hyprland {
         }
     }
 
-    /// Setup Hyprland window rules dynamically to treat background windows as bottom layers
+    /// Setup any necessary layer rules for wengine-wallpaper
     pub fn setup_window_rules() {
-        let rules = [
-            "float, class:^(wengine-bg-.*)$",
-            "pin, class:^(wengine-bg-.*)$",
-            "noborder, class:^(wengine-bg-.*)$",
-            "noinitialfocus, class:^(wengine-bg-.*)$",
-            "nofocus, class:^(wengine-bg-.*)$",
-            "noshadow, class:^(wengine-bg-.*)$",
-            "nodim, class:^(wengine-bg-.*)$",
-            "layer:background, class:^(wengine-bg-.*)$",
-        ];
+        // With native wlr-layer-shell, wengine-wallpaper automatically runs on Layer level 0 (background).
+        // No toplevel window rules needed.
+    }
 
-        for rule in rules {
-            let _ = Command::new("hyprctl")
-                .args(["keyword", "windowrulev2", rule])
-                .output();
-        }
+    /// Send a window to the bottom of the z-order
+    pub fn send_to_bottom(class_name: &str) {
+        let code = format!(
+            "hl.dsp.window.alter_zorder({{ mode = 'bottom', window = 'class:{}' }})",
+            class_name
+        );
+        let _ = Command::new("hyprctl").args(["repl", &code]).output();
     }
 }
