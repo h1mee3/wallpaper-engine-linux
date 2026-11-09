@@ -7,8 +7,10 @@ mod noctalia;
 mod pkg;
 mod renderer;
 mod vdf;
+mod watcher;
 
 use anyhow::Result;
+
 use clap::Parser;
 use cli::{Cli, Commands, NoctaliaCommands, PkgCommands};
 use daemon::Daemon;
@@ -187,6 +189,22 @@ async fn main() -> Result<()> {
             if let Ok(IpcResponse::Ok { data }) = IpcClient::send(IpcRequest::Random { monitor }).await {
                 if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
                     println!("Switched to random wallpaper: \x1b[1;32m{}\x1b[0m", title);
+                }
+            }
+        }
+        Commands::Steam => {
+            println!("🎮 Launching official Wallpaper Engine via Steam...");
+            let res = std::process::Command::new("steam")
+                .arg("steam://rungameid/431960")
+                .spawn();
+
+            match res {
+                Ok(_) => {
+                    println!("✅ Sent launch command to Steam (App ID 431960).");
+                    println!("💡 When you pick or change a wallpaper in the Steam app, `wengine` will automatically detect your selection and update your desktop!");
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to launch Steam: {}", e);
                 }
             }
         }

@@ -90,6 +90,9 @@ pub enum Commands {
         monitor: Option<String>,
     },
 
+    /// Launch the official Wallpaper Engine app via Steam
+    Steam,
+
     /// Inspect and extract Wallpaper Engine .pkg scene archives
     Pkg {
         #[command(subcommand)]

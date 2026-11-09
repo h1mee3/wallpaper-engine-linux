@@ -12,6 +12,8 @@ use crate::discovery::{Discovery, Wallpaper};
 use crate::hyprland::{HyprEvent, Hyprland, Monitor};
 use crate::ipc::{get_socket_path, IpcRequest, IpcResponse};
 use crate::renderer::RenderManager;
+use crate::watcher::SteamWatcher;
+
 
 pub struct DaemonState {
     pub wallpapers: Vec<Wallpaper>,
@@ -138,6 +140,10 @@ impl Daemon {
         Hyprland::setup_window_rules();
 
         let state = Arc::new(Mutex::new(DaemonState::new()));
+
+        // Start Steam Workshop and config.json watcher
+        let state_watcher = Arc::clone(&state);
+        let _watcher_handle = SteamWatcher::start(state_watcher);
 
         // Start Hyprland event listener
         let (hypr_tx, mut hypr_rx) = mpsc::unbounded_channel();
