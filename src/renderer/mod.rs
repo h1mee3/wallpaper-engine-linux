@@ -1,11 +1,11 @@
 pub mod mpv_player;
 
 use anyhow::Result;
+pub use mpv_player::ScalingMode;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use tracing::{debug, info};
-
 
 use crate::discovery::{Wallpaper, WallpaperType};
 use mpv_player::MpvInstance;
@@ -16,6 +16,7 @@ pub struct RenderManager {
     global_paused: bool,
     global_volume: u32,
     global_muted: bool,
+    global_scaling: ScalingMode,
 }
 
 impl RenderManager {
@@ -26,25 +27,41 @@ impl RenderManager {
             global_paused: false,
             global_volume: 50,
             global_muted: true,
+            global_scaling: ScalingMode::Fill,
         }
     }
 
-    /// Apply a wallpaper to a specific monitor (or "*" for all)
-    pub async fn apply_wallpaper(&mut self, monitor: &str, wallpaper: &Wallpaper) -> Result<()> {
+    /// Apply a wallpaper to a specific monitor with exact display geometry
+    pub async fn apply_wallpaper(
+        &mut self,
+        monitor: &str,
+        wallpaper: &Wallpaper,
+        width: u32,
+        height: u32,
+        x: i32,
+        y: i32,
+    ) -> Result<()> {
         info!(
-            "Applying wallpaper '{}' [{:?}] to monitor '{}'",
-            wallpaper.title, wallpaper.wallpaper_type, monitor
+            "Applying wallpaper '{}' [{:?}] to monitor '{}' ({}x{} at +{}+{})",
+            wallpaper.title, wallpaper.wallpaper_type, monitor, width, height, x, y
         );
 
         match wallpaper.wallpaper_type {
             WallpaperType::Video => {
+                let scaling = self.global_scaling;
+                let volume = self.global_volume;
+                let muted = self.global_muted;
+
                 let instance = self
                     .instances
                     .entry(monitor.to_string())
-                    .or_insert_with(|| MpvInstance::new(monitor));
+                    .or_insert_with(|| MpvInstance::new(monitor, width, height, x, y));
 
-                instance.set_volume(self.global_volume).await?;
-                instance.set_mute(self.global_muted).await?;
+                // Update geometry in case monitor configuration changed
+                instance.update_geometry(width, height, x, y);
+                instance.set_scaling_mode(scaling).await?;
+                instance.set_volume(volume).await?;
+                instance.set_mute(muted).await?;
                 instance.load_file(&wallpaper.full_file_path).await?;
 
                 // Also update Noctalia's wallpaper to the preview image so lockscreen/desktop theme colors sync
@@ -88,6 +105,15 @@ impl RenderManager {
         let _ = Command::new("noctalia")
             .args(["msg", "color-scheme-set", "wallpaper", "scheme-tonal-spot"])
             .output();
+    }
+
+    /// Set scaling mode across all instances
+    pub async fn set_scaling_mode(&mut self, mode: ScalingMode) -> Result<()> {
+        self.global_scaling = mode;
+        for inst in self.instances.values_mut() {
+            inst.set_scaling_mode(mode).await?;
+        }
+        Ok(())
     }
 
     /// Pause all running wallpaper instances (e.g. when entering fullscreen in a game)
@@ -157,6 +183,11 @@ impl RenderManager {
     /// Current mute state
     pub fn is_muted(&self) -> bool {
         self.global_muted
+    }
+
+    /// Current scaling mode
+    pub fn scaling_mode(&self) -> ScalingMode {
+        self.global_scaling
     }
 
     /// Terminate all instances

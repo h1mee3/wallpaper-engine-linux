@@ -10,7 +10,6 @@ mod vdf;
 mod watcher;
 
 use anyhow::Result;
-
 use clap::Parser;
 use cli::{Cli, Commands, NoctaliaCommands, PkgCommands};
 use daemon::Daemon;
@@ -18,6 +17,7 @@ use discovery::{Discovery, Wallpaper, WallpaperType};
 use ipc::{IpcClient, IpcRequest, IpcResponse};
 use noctalia::NoctaliaIntegration;
 use pkg::PkgArchive;
+use renderer::ScalingMode;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,7 +36,6 @@ async fn main() -> Result<()> {
             filter_type,
             search,
         } => {
-            // Try querying daemon first, fallback to direct disk scan
             let mut wallpapers = match IpcClient::send(IpcRequest::List).await {
                 Ok(IpcResponse::Ok { data }) => {
                     serde_json::from_value::<Vec<Wallpaper>>(data).unwrap_or_default()
@@ -44,7 +43,6 @@ async fn main() -> Result<()> {
                 _ => Discovery::discover_all(&[]),
             };
 
-            // Filter by type
             if let Some(ref ft) = filter_type {
                 let target = ft.to_lowercase();
                 wallpapers.retain(|w| match (&w.wallpaper_type, target.as_str()) {
@@ -55,7 +53,6 @@ async fn main() -> Result<()> {
                 });
             }
 
-            // Filter by search query
             if let Some(ref q) = search {
                 let q_lower = q.to_lowercase();
                 wallpapers.retain(|w| {
@@ -117,6 +114,15 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Scale { mode } => {
+            let sm: ScalingMode = mode.into();
+            match IpcClient::send(IpcRequest::Scaling { mode: sm }).await {
+                Ok(IpcResponse::Ok { .. }) => {
+                    println!("📐 Video display scaling mode set to: \x1b[1;32m{:?}\x1b[0m", sm);
+                }
+                _ => eprintln!("⚠️  wengine daemon is not running."),
+            }
+        }
         Commands::Status { json } => {
             match IpcClient::send(IpcRequest::Status).await {
                 Ok(IpcResponse::Ok { data }) => {
@@ -128,10 +134,25 @@ async fn main() -> Result<()> {
                         let volume = data.get("volume").and_then(|v| v.as_u64()).unwrap_or(0);
                         let muted = data.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
                         let total = data.get("total_wallpapers").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let scaling = data.get("scaling_mode").and_then(|v| v.as_str()).unwrap_or("fill");
 
                         println!("   Playback:  {}", if paused { "\x1b[33mPaused\x1b[0m" } else { "\x1b[32mPlaying\x1b[0m" });
+                        println!("   Scaling:   \x1b[35;1m{}\x1b[0m (fill / fit / stretch)", scaling);
                         println!("   Volume:    {}% (Muted: {})", volume, muted);
                         println!("   Library:   {} wallpapers indexed", total);
+
+                        if let Some(monitors) = data.get("monitors").and_then(|v| v.as_array()) {
+                            println!("\n   \x1b[1mConnected Displays:\x1b[0m");
+                            for m in monitors {
+                                let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                                let w = m.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let h = m.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let x = m.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let y = m.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let hz = m.get("refreshRate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                println!("    🖥️  \x1b[36m{}\x1b[0m: {}x{} @ {:.0}Hz (+{}+{})", name, w, h, hz, x, y);
+                            }
+                        }
 
                         if let Some(active) = data.get("active_wallpapers").and_then(|v| v.as_object()) {
                             println!("\n   \x1b[1mActive Wallpapers:\x1b[0m");

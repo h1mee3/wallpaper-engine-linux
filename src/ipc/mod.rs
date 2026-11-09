@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+use crate::renderer::ScalingMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -22,6 +23,9 @@ pub enum IpcRequest {
     },
     Mute {
         value: bool,
+    },
+    Scaling {
+        mode: ScalingMode,
     },
     Next {
         monitor: Option<String>,

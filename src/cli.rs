@@ -1,5 +1,7 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+use crate::renderer::ScalingMode;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -11,6 +13,26 @@ use std::path::PathBuf;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CliScalingMode {
+    /// Crop / zoom to fill entire display resolution with zero black bars (Default)
+    Fill,
+    /// Letterbox / pillarbox to show 100% of video without cropping
+    Fit,
+    /// Stretch video to exact display aspect ratio
+    Stretch,
+}
+
+impl From<CliScalingMode> for ScalingMode {
+    fn from(c: CliScalingMode) -> Self {
+        match c {
+            CliScalingMode::Fill => ScalingMode::Fill,
+            CliScalingMode::Fit => ScalingMode::Fit,
+            CliScalingMode::Stretch => ScalingMode::Stretch,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -48,6 +70,12 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+
+    /// Set video display scaling mode (fill / fit / stretch)
+    Scale {
+        /// Scaling mode: fill (crop to fill display, no black bars), fit, stretch
+        mode: CliScalingMode,
     },
 
     /// Toggle wallpaper pause/playback

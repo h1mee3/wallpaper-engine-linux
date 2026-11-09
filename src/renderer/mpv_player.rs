@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -6,32 +7,63 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tracing::{debug, info, warn};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScalingMode {
+    Fill,    // Cover / Crop to fill 100% of display (zero black bars)
+    Fit,     // Letterbox / Pillarbox
+    Stretch, // Stretch to exact display aspect ratio
+}
+
+impl Default for ScalingMode {
+    fn default() -> Self {
+        ScalingMode::Fill
+    }
+}
 
 pub struct MpvInstance {
     pub monitor: String,
+    pub width: u32,
+    pub height: u32,
+    pub x: i32,
+    pub y: i32,
     pub socket_path: PathBuf,
     pub process: Option<Child>,
     pub current_file: Option<PathBuf>,
     pub paused: bool,
     pub volume: u32,
     pub muted: bool,
+    pub scaling_mode: ScalingMode,
 }
 
 impl MpvInstance {
-    pub fn new(monitor: &str) -> Self {
+    pub fn new(monitor: &str, width: u32, height: u32, x: i32, y: i32) -> Self {
         let socket_path = PathBuf::from(format!("/tmp/wengine-mpv-{}.sock", monitor));
         Self {
             monitor: monitor.to_string(),
+            width,
+            height,
+            x,
+            y,
             socket_path,
             process: None,
             current_file: None,
             paused: false,
             volume: 0, // default muted for background wallpaper
             muted: true,
+            scaling_mode: ScalingMode::Fill,
         }
     }
 
-    /// Ensure MPV background process is running with IPC socket
+    /// Update target display geometry
+    pub fn update_geometry(&mut self, width: u32, height: u32, x: i32, y: i32) {
+        self.width = width;
+        self.height = height;
+        self.x = x;
+        self.y = y;
+    }
+
+    /// Ensure MPV background process is running with IPC socket and exact display resolution
     pub fn ensure_running(&mut self) -> Result<()> {
         if self.is_alive() {
             return Ok(());
@@ -42,7 +74,10 @@ impl MpvInstance {
             let _ = std::fs::remove_file(&self.socket_path);
         }
 
-        info!("Spawning MPV wallpaper backend for monitor {}", self.monitor);
+        info!(
+            "Spawning MPV wallpaper backend for monitor {} (resolution: {}x{} at +{}+{})",
+            self.monitor, self.width, self.height, self.x, self.y
+        );
 
         let app_id = format!("wengine-bg-{}", self.monitor);
         let socket_arg = format!("--input-ipc-server={}", self.socket_path.to_string_lossy());
@@ -50,24 +85,54 @@ impl MpvInstance {
         let title_arg = format!("--title={}", app_id);
         let volume_arg = format!("--volume={}", self.volume);
 
+        // Exact resolution, autofit, and display binding
+        let geom_arg = format!(
+            "--geometry={}x{}+{}+{}",
+            self.width, self.height, self.x, self.y
+        );
+        let autofit_arg = format!("--autofit={}x{}", self.width, self.height);
+        let screen_arg = format!("--screen-name={}", self.monitor);
+        let fs_screen_arg = format!("--fs-screen-name={}", self.monitor);
+
+        let panscan_arg = match self.scaling_mode {
+            ScalingMode::Fill => "--panscan=1.0",
+            ScalingMode::Fit => "--panscan=0.0",
+            ScalingMode::Stretch => "--panscan=0.0",
+        };
+        let keepaspect_arg = match self.scaling_mode {
+            ScalingMode::Stretch => "--keepaspect=no",
+            _ => "--keepaspect=yes",
+        };
+
         let mut cmd = Command::new("mpv");
         cmd.args([
             "--no-config",
             "--idle=yes",
             "--loop-file=inf",
             "--hwdec=auto-safe",
-            "--no-audio", // initial mute
+            "--no-audio",
             "--no-osc",
             "--no-osd-bar",
             "--no-input-default-bindings",
             "--no-stop-screensaver",
             "--really-quiet",
+            "--keepaspect-window=no",
+            "--video-unscaled=no",
+            "--fullscreen",
+            "--force-window=yes",
+            "--ontop=no",
+            "--border=no",
             &socket_arg,
             &app_id_arg,
             &title_arg,
             &volume_arg,
+            &geom_arg,
+            &autofit_arg,
+            &screen_arg,
+            &fs_screen_arg,
+            panscan_arg,
+            keepaspect_arg,
         ])
-
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -84,7 +149,10 @@ impl MpvInstance {
             }
         }
 
-        warn!("MPV process spawned but socket {:?} took long to create", self.socket_path);
+        warn!(
+            "MPV process spawned but socket {:?} took long to create",
+            self.socket_path
+        );
         Ok(())
     }
 
@@ -135,8 +203,42 @@ impl MpvInstance {
         self.current_file = Some(path.to_path_buf());
         self.paused = false;
 
-        // Apply audio settings
+        // Apply audio & scaling settings
         self.apply_audio().await?;
+        self.apply_scaling().await?;
+
+        Ok(())
+    }
+
+    /// Change scaling mode in real time
+    pub async fn set_scaling_mode(&mut self, mode: ScalingMode) -> Result<()> {
+        self.scaling_mode = mode;
+        self.apply_scaling().await?;
+        Ok(())
+    }
+
+    async fn apply_scaling(&self) -> Result<()> {
+        if !self.socket_path.exists() {
+            return Ok(());
+        }
+
+        let panscan = match self.scaling_mode {
+            ScalingMode::Fill => 1.0,
+            _ => 0.0,
+        };
+        let keepaspect = self.scaling_mode != ScalingMode::Stretch;
+
+        let _ = self
+            .send_command(json!({
+                "command": ["set_property", "panscan", panscan]
+            }))
+            .await;
+
+        let _ = self
+            .send_command(json!({
+                "command": ["set_property", "keepaspect", keepaspect]
+            }))
+            .await;
 
         Ok(())
     }

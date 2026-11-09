@@ -7,13 +7,11 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
-
 use crate::discovery::{Discovery, Wallpaper};
 use crate::hyprland::{HyprEvent, Hyprland, Monitor};
 use crate::ipc::{get_socket_path, IpcRequest, IpcResponse};
-use crate::renderer::RenderManager;
+use crate::renderer::{RenderManager, ScalingMode};
 use crate::watcher::SteamWatcher;
-
 
 pub struct DaemonState {
     pub wallpapers: Vec<Wallpaper>,
@@ -46,6 +44,17 @@ impl DaemonState {
         info!("Rescanned library: {} wallpapers", self.wallpapers.len());
     }
 
+    /// Retrieve the exact resolution and coordinate offset for a monitor
+    pub fn get_monitor_geometry(&self, mon_name: &str) -> (u32, u32, i32, i32) {
+        if let Some(m) = self.monitors.iter().find(|m| m.name == mon_name) {
+            (m.logical_width(), m.logical_height(), m.x, m.y)
+        } else if let Some(first) = self.monitors.first() {
+            (first.logical_width(), first.logical_height(), first.x, first.y)
+        } else {
+            (1920, 1080, 0, 0)
+        }
+    }
+
     pub fn find_wallpaper(&self, query: &str) -> Option<&Wallpaper> {
         // Direct ID match
         if let Some(wp) = self.wallpapers.iter().find(|w| w.id == query) {
@@ -74,14 +83,23 @@ impl DaemonState {
         let mon_target = monitor.unwrap_or("*");
         if mon_target == "*" {
             if self.monitors.is_empty() {
-                self.render_manager.apply_wallpaper("DP-1", &wp).await?;
+                let (w, h, x, y) = self.get_monitor_geometry("DP-1");
+                self.render_manager
+                    .apply_wallpaper("DP-1", &wp, w, h, x, y)
+                    .await?;
             } else {
                 for m in &self.monitors {
-                    self.render_manager.apply_wallpaper(&m.name, &wp).await?;
+                    let (w, h, x, y) = (m.logical_width(), m.logical_height(), m.x, m.y);
+                    self.render_manager
+                        .apply_wallpaper(&m.name, &wp, w, h, x, y)
+                        .await?;
                 }
             }
         } else {
-            self.render_manager.apply_wallpaper(mon_target, &wp).await?;
+            let (w, h, x, y) = self.get_monitor_geometry(mon_target);
+            self.render_manager
+                .apply_wallpaper(mon_target, &wp, w, h, x, y)
+                .await?;
         }
 
         Ok(wp)
@@ -102,7 +120,10 @@ impl DaemonState {
 
         *current_idx = next_idx;
         let wp = self.wallpapers[next_idx].clone();
-        self.render_manager.apply_wallpaper(monitor, &wp).await?;
+        let (w, h, x, y) = self.get_monitor_geometry(monitor);
+        self.render_manager
+            .apply_wallpaper(monitor, &wp, w, h, x, y)
+            .await?;
         Ok(Some(wp))
     }
 
@@ -119,7 +140,10 @@ impl DaemonState {
 
         self.current_indices.insert(monitor.to_string(), idx);
         let wp = self.wallpapers[idx].clone();
-        self.render_manager.apply_wallpaper(monitor, &wp).await?;
+        let (w, h, x, y) = self.get_monitor_geometry(monitor);
+        self.render_manager
+            .apply_wallpaper(monitor, &wp, w, h, x, y)
+            .await?;
         Ok(Some(wp))
     }
 }
@@ -244,6 +268,7 @@ impl Daemon {
                     "paused": s.render_manager.is_paused(),
                     "volume": s.render_manager.volume(),
                     "muted": s.render_manager.is_muted(),
+                    "scaling_mode": s.render_manager.scaling_mode(),
                     "active_wallpapers": active,
                     "monitors": s.monitors,
                     "total_wallpapers": s.wallpapers.len(),
@@ -280,6 +305,12 @@ impl Daemon {
                 let _ = s.render_manager.set_mute(value).await;
                 IpcResponse::Ok {
                     data: json!({ "muted": value }),
+                }
+            }
+            IpcRequest::Scaling { mode } => {
+                let _ = s.render_manager.set_scaling_mode(mode).await;
+                IpcResponse::Ok {
+                    data: json!({ "scaling_mode": mode }),
                 }
             }
             IpcRequest::Next { monitor } => {
