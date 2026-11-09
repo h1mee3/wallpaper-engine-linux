@@ -7,7 +7,7 @@ use crate::renderer::ScalingMode;
 #[command(
     name = "wengine",
     author = "hime",
-    version = "0.1.0",
+    version = "0.2.0",
     about = "Wallpaper Engine Linux Layer for any Wayland DE/WM (Hyprland, Sway, KDE, GNOME, River, Niri, Cosmic, etc.)"
 )]
 pub struct Cli {
