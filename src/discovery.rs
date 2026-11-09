@@ -59,13 +59,7 @@ impl Wallpaper {
             }
         }
 
-        // 2. Check for animated preview.gif
-        let gif_path = self.folder_path.join("preview.gif");
-        if gif_path.exists() {
-            return Some(gif_path);
-        }
-
-        // 3. Check if scene.pkg has extractable video, gif, or image
+        // 2. For Scene wallpapers, extract high-resolution (4K / 1080p) native textures from scene.pkg
         let pkg_path = self.folder_path.join("scene.pkg");
         if pkg_path.exists() {
             if let Ok(archive) = crate::pkg::PkgArchive::open(&pkg_path) {
@@ -78,18 +72,18 @@ impl Wallpaper {
             }
         }
 
-        // 4. Check for high-res preview image
-        if let Some(ref p) = self.preview_path {
-            if p.exists() {
-                return Some(p.clone());
-            }
-        }
-
+        // 3. Check for high-res preview image in folder
         for ext in &["png", "jpg", "jpeg", "webp"] {
             let p = self.folder_path.join(format!("preview.{}", ext));
             if p.exists() {
                 return Some(p);
             }
+        }
+
+        // 4. Check for animated preview.gif
+        let gif_path = self.folder_path.join("preview.gif");
+        if gif_path.exists() {
+            return Some(gif_path);
         }
 
         // 5. Fallback: if full_file_path itself is an image or media
