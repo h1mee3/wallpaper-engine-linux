@@ -1,13 +1,13 @@
 pub mod mpv_player;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 pub use mpv_player::ScalingMode;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use tracing::{debug, info};
 
-use crate::discovery::{Wallpaper, WallpaperType};
+use crate::discovery::Wallpaper;
 use mpv_player::MpvInstance;
 
 pub struct RenderManager {
@@ -46,43 +46,40 @@ impl RenderManager {
             wallpaper.title, wallpaper.wallpaper_type, monitor, width, height, x, y
         );
 
-        match wallpaper.wallpaper_type {
-            WallpaperType::Video => {
-                let scaling = self.global_scaling;
-                let volume = self.global_volume;
-                let muted = self.global_muted;
+        // Resolve the best playable media asset (video, animated gif, or high-res image)
+        let playable_file = wallpaper.resolve_playable_path().with_context(|| {
+            format!(
+                "No playable media found for wallpaper '{}' ({})",
+                wallpaper.title, wallpaper.id
+            )
+        })?;
 
-                let instance = self
-                    .instances
-                    .entry(monitor.to_string())
-                    .or_insert_with(|| MpvInstance::new(monitor, width, height, x, y));
+        let audio_file = wallpaper.resolve_audio_path();
 
-                // Update geometry in case monitor configuration changed
-                instance.update_geometry(width, height, x, y);
-                instance.set_scaling_mode(scaling).await?;
-                instance.set_volume(volume).await?;
-                instance.set_mute(muted).await?;
-                instance.load_file(&wallpaper.full_file_path).await?;
+        let scaling = self.global_scaling;
+        let volume = self.global_volume;
+        let muted = self.global_muted;
 
-                // Also update Noctalia's wallpaper to the preview image so lockscreen/desktop theme colors sync
-                if let Some(ref preview) = wallpaper.preview_path {
-                    Self::sync_noctalia_wallpaper(monitor, preview);
-                }
-            }
-            WallpaperType::Scene | WallpaperType::Web | _ => {
-                // If there's an active video instance on this monitor, stop it
-                if let Some(mut inst) = self.instances.remove(monitor) {
-                    inst.stop();
-                }
+        let instance = self
+            .instances
+            .entry(monitor.to_string())
+            .or_insert_with(|| MpvInstance::new(monitor, width, height, x, y));
 
-                // If preview or extracted image exists, set via Noctalia / swaybg
-                if let Some(ref preview) = wallpaper.preview_path {
-                    Self::sync_noctalia_wallpaper(monitor, preview);
-                } else if wallpaper.folder_path.join("preview.jpg").exists() {
-                    let preview = wallpaper.folder_path.join("preview.jpg");
-                    Self::sync_noctalia_wallpaper(monitor, &preview);
-                }
-            }
+        // Update geometry in case monitor configuration changed
+        instance.update_geometry(width, height, x, y);
+        instance.set_scaling_mode(scaling).await?;
+        instance.set_volume(volume).await?;
+        instance.set_mute(muted).await?;
+        instance
+            .load_file_with_audio(&playable_file, audio_file.as_deref())
+            .await?;
+
+        // Also update Noctalia's wallpaper to the preview image so lockscreen/desktop theme colors sync
+        if let Some(ref preview) = wallpaper.preview_path {
+            Self::sync_noctalia_wallpaper(monitor, preview);
+        } else if wallpaper.folder_path.join("preview.jpg").exists() {
+            let preview = wallpaper.folder_path.join("preview.jpg");
+            Self::sync_noctalia_wallpaper(monitor, &preview);
         }
 
         self.current_wallpapers

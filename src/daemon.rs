@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::discovery::{Discovery, Wallpaper};
 use crate::hyprland::{HyprEvent, Hyprland, Monitor};
 use crate::ipc::{get_socket_path, IpcRequest, IpcResponse};
-use crate::renderer::{RenderManager, ScalingMode};
+use crate::renderer::RenderManager;
 use crate::watcher::SteamWatcher;
 
 pub struct DaemonState {

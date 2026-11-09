@@ -164,21 +164,35 @@ impl MpvInstance {
         Ok(resp)
     }
 
-    /// Load a video file seamlessly (gapless replace)
-    pub async fn load_file(&mut self, path: &Path) -> Result<()> {
+    /// Load a media file (video, animated gif, or image) with optional accompanying audio track
+    pub async fn load_file_with_audio(
+        &mut self,
+        path: &Path,
+        audio_path: Option<&Path>,
+    ) -> Result<()> {
         let is_running = self.is_alive();
         if !is_running {
             self.ensure_running(Some(path))?;
         }
 
         let path_str = path.to_string_lossy().to_string();
-        info!("Loading video on monitor {}: {}", self.monitor, path_str);
+        info!("Loading media on monitor {}: {}", self.monitor, path_str);
 
         if is_running {
             let cmd = json!({
                 "command": ["loadfile", path_str, "replace"]
             });
             self.send_command(cmd).await?;
+        }
+
+        // If an external audio track is provided, attach it
+        if let Some(audio) = audio_path {
+            let audio_str = audio.to_string_lossy().to_string();
+            info!("Attaching audio track on monitor {}: {}", self.monitor, audio_str);
+            let audio_cmd = json!({
+                "command": ["audio-add", audio_str, "auto"]
+            });
+            let _ = self.send_command(audio_cmd).await;
         }
 
         self.current_file = Some(path.to_path_buf());
@@ -189,6 +203,11 @@ impl MpvInstance {
         let _ = self.apply_scaling().await;
 
         Ok(())
+    }
+
+    /// Load a media file seamlessly (gapless replace)
+    pub async fn load_file(&mut self, path: &Path) -> Result<()> {
+        self.load_file_with_audio(path, None).await
     }
 
     /// Change scaling mode in real time

@@ -129,4 +129,79 @@ impl PkgArchive {
 
         Ok(())
     }
+
+    /// Extract the best playable visual asset (video, gif, or image) from the PKG to out_dir
+    pub fn extract_playable_asset<P: AsRef<Path>>(&self, out_dir: P) -> Result<Option<PathBuf>> {
+        let dest = out_dir.as_ref();
+        std::fs::create_dir_all(dest)?;
+
+        // 1. Look for embedded video files (.mp4, .webm)
+        for entry in &self.entries {
+            let lower = entry.name.to_lowercase();
+            if lower.ends_with(".mp4") || lower.ends_with(".webm") {
+                if let Some(file_name) = Path::new(&entry.name).file_name() {
+                    let out_file = dest.join(file_name);
+                    if !out_file.exists() {
+                        let data = self.read_entry(entry)?;
+                        std::fs::write(&out_file, data)?;
+                    }
+                    return Ok(Some(out_file));
+                }
+            }
+        }
+
+        // 2. Look for embedded animated GIF
+        for entry in &self.entries {
+            let lower = entry.name.to_lowercase();
+            if lower.ends_with(".gif") {
+                if let Some(file_name) = Path::new(&entry.name).file_name() {
+                    let out_file = dest.join(file_name);
+                    if !out_file.exists() {
+                        let data = self.read_entry(entry)?;
+                        std::fs::write(&out_file, data)?;
+                    }
+                    return Ok(Some(out_file));
+                }
+            }
+        }
+
+        // 3. Look for standard image files (.png, .jpg, .jpeg, .webp)
+        for entry in &self.entries {
+            let lower = entry.name.to_lowercase();
+            if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".webp") {
+                if let Some(file_name) = Path::new(&entry.name).file_name() {
+                    let out_file = dest.join(file_name);
+                    if !out_file.exists() {
+                        let data = self.read_entry(entry)?;
+                        std::fs::write(&out_file, data)?;
+                    }
+                    return Ok(Some(out_file));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Extract an audio track from the PKG archive if present (.mp3, .ogg, .wav, .flac)
+    pub fn extract_audio_asset<P: AsRef<Path>>(&self, out_dir: P) -> Result<Option<PathBuf>> {
+        let dest = out_dir.as_ref();
+        std::fs::create_dir_all(dest)?;
+
+        for entry in &self.entries {
+            let lower = entry.name.to_lowercase();
+            if lower.ends_with(".mp3") || lower.ends_with(".ogg") || lower.ends_with(".wav") || lower.ends_with(".flac") {
+                if let Some(file_name) = Path::new(&entry.name).file_name() {
+                    let out_file = dest.join(file_name);
+                    if !out_file.exists() {
+                        let data = self.read_entry(entry)?;
+                        std::fs::write(&out_file, data)?;
+                    }
+                    return Ok(Some(out_file));
+                }
+            }
+        }
+
+        Ok(None)
+    }
 }
