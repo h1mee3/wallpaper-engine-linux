@@ -14,6 +14,7 @@
 #include <mpv/render_gl.h>
 
 #include "wlr-layer-shell.h"
+#include "xdg-shell.h"
 
 static volatile sig_atomic_t running = 1;
 
@@ -22,16 +23,35 @@ static void sig_handler(int sig) {
     running = 0;
 }
 
+struct bound_output {
+    struct wl_output *output;
+    uint32_t id;
+    char name[64];
+    int32_t x;
+    int32_t y;
+    int32_t width;
+    int32_t height;
+    int32_t scale;
+    struct bound_output *next;
+};
+
 struct app_state {
     struct wl_display *display;
     struct wl_registry *registry;
     struct wl_compositor *compositor;
     struct zwlr_layer_shell_v1 *layer_shell;
+    struct xdg_wm_base *xdg_wm_base;
+
+    struct bound_output *outputs;
     struct wl_output *output;
     char target_output_name[64];
 
     struct wl_surface *surface;
     struct zwlr_layer_surface_v1 *layer_surface;
+    struct xdg_surface *xdg_surface;
+    struct xdg_toplevel *xdg_toplevel;
+    bool is_xdg_mode;
+
     struct wl_egl_window *egl_window;
 
     EGLDisplay egl_display;
@@ -58,11 +78,12 @@ static void on_mpv_render_update(void *ctx) {
     app->need_render = true;
 }
 
+/* Layer Shell Callbacks */
 static void layer_surface_configure(void *data,
-                                   struct zwlr_layer_surface_v1 *layer_surface,
-                                   uint32_t serial,
-                                   uint32_t width,
-                                   uint32_t height) {
+                                    struct zwlr_layer_surface_v1 *layer_surface,
+                                    uint32_t serial,
+                                    uint32_t width,
+                                    uint32_t height) {
     struct app_state *app = (struct app_state *)data;
     zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
 
@@ -90,18 +111,132 @@ static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
     .closed = layer_surface_closed,
 };
 
+/* XDG Shell Callbacks */
+static void xdg_wm_base_ping(void *data, struct xdg_wm_base *xdg_wm_base, uint32_t serial) {
+    (void)data;
+    xdg_wm_base_pong(xdg_wm_base, serial);
+}
+
+static const struct xdg_wm_base_listener xdg_wm_base_listener = {
+    .ping = xdg_wm_base_ping,
+};
+
+static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
+    struct app_state *app = (struct app_state *)data;
+    xdg_surface_ack_configure(xdg_surface, serial);
+
+    if (app->egl_window && app->width > 0 && app->height > 0) {
+        wl_egl_window_resize(app->egl_window, app->width, app->height, 0, 0);
+    }
+
+    app->configured = true;
+    app->need_render = true;
+}
+
+static const struct xdg_surface_listener xdg_surface_listener = {
+    .configure = xdg_surface_configure,
+};
+
+static void xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel,
+                                   int32_t width, int32_t height, struct wl_array *states) {
+    (void)xdg_toplevel;
+    (void)states;
+    struct app_state *app = (struct app_state *)data;
+    if (width > 0 && height > 0) {
+        app->width = width;
+        app->height = height;
+    }
+}
+
+static void xdg_toplevel_close(void *data, struct xdg_toplevel *xdg_toplevel) {
+    (void)data;
+    (void)xdg_toplevel;
+    running = 0;
+}
+
+static const struct xdg_toplevel_listener xdg_toplevel_listener = {
+    .configure = xdg_toplevel_configure,
+    .close = xdg_toplevel_close,
+};
+
+/* Output Callbacks */
+static void output_geometry(void *data, struct wl_output *output,
+                            int32_t x, int32_t y, int32_t physical_width, int32_t physical_height,
+                            int32_t subpixel, const char *make, const char *model, int32_t transform) {
+    (void)output; (void)physical_width; (void)physical_height; (void)subpixel; (void)make; (void)model; (void)transform;
+    struct bound_output *node = (struct bound_output *)data;
+    node->x = x;
+    node->y = y;
+}
+
+static void output_mode(void *data, struct wl_output *output,
+                        uint32_t flags, int32_t width, int32_t height, int32_t refresh) {
+    (void)output; (void)refresh;
+    struct bound_output *node = (struct bound_output *)data;
+    if (flags & WL_OUTPUT_MODE_CURRENT) {
+        node->width = width;
+        node->height = height;
+    }
+}
+
+static void output_done(void *data, struct wl_output *output) {
+    (void)data;
+    (void)output;
+}
+
+static void output_scale(void *data, struct wl_output *output, int32_t factor) {
+    (void)output;
+    struct bound_output *node = (struct bound_output *)data;
+    if (factor > 0) {
+        node->scale = factor;
+    }
+}
+
+static void output_name(void *data, struct wl_output *output, const char *name) {
+    (void)output;
+    struct bound_output *node = (struct bound_output *)data;
+    if (name) {
+        strncpy(node->name, name, sizeof(node->name) - 1);
+    }
+}
+
+static void output_description(void *data, struct wl_output *output, const char *description) {
+    (void)data;
+    (void)output;
+    (void)description;
+}
+
+static const struct wl_output_listener output_listener = {
+    .geometry = output_geometry,
+    .mode = output_mode,
+    .done = output_done,
+    .scale = output_scale,
+    .name = output_name,
+    .description = output_description,
+};
+
+/* Registry Callbacks */
 static void registry_handler(void *data, struct wl_registry *registry,
-                            uint32_t id, const char *interface, uint32_t version) {
+                             uint32_t id, const char *interface, uint32_t version) {
     struct app_state *app = (struct app_state *)data;
 
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
         app->compositor = wl_registry_bind(registry, id, &wl_compositor_interface, version < 4 ? version : 4);
     } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
         app->layer_shell = wl_registry_bind(registry, id, &zwlr_layer_shell_v1_interface, 1);
+    } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
+        app->xdg_wm_base = wl_registry_bind(registry, id, &xdg_wm_base_interface, 1);
+        xdg_wm_base_add_listener(app->xdg_wm_base, &xdg_wm_base_listener, app);
     } else if (strcmp(interface, wl_output_interface.name) == 0) {
-        if (!app->output) {
-            app->output = wl_registry_bind(registry, id, &wl_output_interface, 1);
-        }
+        uint32_t bind_ver = version < 4 ? version : 4;
+        struct wl_output *out = wl_registry_bind(registry, id, &wl_output_interface, bind_ver);
+        struct bound_output *node = calloc(1, sizeof(struct bound_output));
+        node->output = out;
+        node->id = id;
+        node->scale = 1;
+        node->next = app->outputs;
+        app->outputs = node;
+        wl_output_add_listener(out, &output_listener, node);
     }
 }
 
@@ -155,7 +290,6 @@ static bool init_egl(struct app_state *app) {
 
     app->egl_context = eglCreateContext(app->egl_display, app->egl_config, EGL_NO_CONTEXT, ctx_attribs);
     if (app->egl_context == EGL_NO_CONTEXT) {
-        // Fallback to default version
         app->egl_context = eglCreateContext(app->egl_display, app->egl_config, EGL_NO_CONTEXT, NULL);
     }
 
@@ -195,12 +329,69 @@ int main(int argc, char *argv[]) {
 
     app.registry = wl_display_get_registry(app.display);
     wl_registry_add_listener(app.registry, &registry_listener, &app);
+
+    // Initial roundtrip to bind globals
+    wl_display_roundtrip(app.display);
+    // Second roundtrip to receive output events (name, geometry, mode)
     wl_display_roundtrip(app.display);
 
-    if (!app.compositor || !app.layer_shell) {
-        fprintf(stderr, "Compositor does not support wl_compositor or zwlr_layer_shell_v1\n");
+    if (!app.compositor) {
+        fprintf(stderr, "Compositor does not support wl_compositor\n");
         wl_display_disconnect(app.display);
         return 1;
+    }
+
+    if (!app.layer_shell && !app.xdg_wm_base) {
+        fprintf(stderr, "Compositor supports neither zwlr_layer_shell_v1 nor xdg_wm_base\n");
+        wl_display_disconnect(app.display);
+        return 1;
+    }
+
+    // Resolve matching output if specified
+    struct wl_output *chosen_output = NULL;
+    if (app.target_output_name[0] != '\0' && strcmp(app.target_output_name, "*") != 0) {
+        struct bound_output *cur = app.outputs;
+        while (cur) {
+            if (strcmp(cur->name, app.target_output_name) == 0) {
+                chosen_output = cur->output;
+                if (cur->width > 0 && cur->height > 0) {
+                    app.width = cur->width;
+                    app.height = cur->height;
+                }
+                break;
+            }
+            cur = cur->next;
+        }
+
+        // Try numeric index fallback
+        if (!chosen_output) {
+            char *endptr = NULL;
+            long idx = strtol(app.target_output_name, &endptr, 10);
+            if (endptr && *endptr == '\0' && idx >= 0) {
+                cur = app.outputs;
+                long i = 0;
+                while (cur) {
+                    if (i == idx) {
+                        chosen_output = cur->output;
+                        if (cur->width > 0 && cur->height > 0) {
+                            app.width = cur->width;
+                            app.height = cur->height;
+                        }
+                        break;
+                    }
+                    i++;
+                    cur = cur->next;
+                }
+            }
+        }
+    }
+
+    app.output = chosen_output;
+    if (app.output) {
+        fprintf(stderr, "wengine-layer-player: Targeting display '%s' (%dx%d)\n",
+                app.target_output_name, app.width, app.height);
+    } else {
+        fprintf(stderr, "wengine-layer-player: Spanning default/all displays\n");
     }
 
     if (!init_egl(&app)) {
@@ -208,31 +399,46 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Create background layer surface
+    // Create wayland surface
     app.surface = wl_compositor_create_surface(app.compositor);
-    app.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-        app.layer_shell,
-        app.surface,
-        app.output,
-        ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND,
-        "wengine-wallpaper"
-    );
 
-    // Anchor to all edges to span entire monitor
-    zwlr_layer_surface_v1_set_anchor(
-        app.layer_surface,
-        ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
-        ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
-        ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
-        ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT
-    );
-    // Explicit 0, 0 size for anchored full-monitor surfaces
-    zwlr_layer_surface_v1_set_size(app.layer_surface, 0, 0);
+    if (app.layer_shell) {
+        app.is_xdg_mode = false;
+        app.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+            app.layer_shell,
+            app.surface,
+            app.output,
+            ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND,
+            "wengine-wallpaper"
+        );
 
-    // Exclusive zone -1: true background, never reserve layout space
-    zwlr_layer_surface_v1_set_exclusive_zone(app.layer_surface, -1);
-    zwlr_layer_surface_v1_set_keyboard_interactivity(app.layer_surface, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
-    zwlr_layer_surface_v1_add_listener(app.layer_surface, &layer_surface_listener, &app);
+        // Anchor to all edges to span entire display
+        zwlr_layer_surface_v1_set_anchor(
+            app.layer_surface,
+            ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+            ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+            ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
+            ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT
+        );
+        zwlr_layer_surface_v1_set_size(app.layer_surface, 0, 0);
+
+        // Exclusive zone -1: true background layer, never reserve layout space
+        zwlr_layer_surface_v1_set_exclusive_zone(app.layer_surface, -1);
+        zwlr_layer_surface_v1_set_keyboard_interactivity(app.layer_surface, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+        zwlr_layer_surface_v1_add_listener(app.layer_surface, &layer_surface_listener, &app);
+    } else {
+        app.is_xdg_mode = true;
+        fprintf(stderr, "wengine-layer-player: zwlr_layer_shell_v1 unavailable, using xdg_wm_base fallback\n");
+
+        app.xdg_surface = xdg_wm_base_get_xdg_surface(app.xdg_wm_base, app.surface);
+        xdg_surface_add_listener(app.xdg_surface, &xdg_surface_listener, &app);
+
+        app.xdg_toplevel = xdg_surface_get_toplevel(app.xdg_surface);
+        xdg_toplevel_add_listener(app.xdg_toplevel, &xdg_toplevel_listener, &app);
+        xdg_toplevel_set_app_id(app.xdg_toplevel, "wengine-wallpaper");
+        xdg_toplevel_set_title(app.xdg_toplevel, "wengine-wallpaper");
+        xdg_toplevel_set_fullscreen(app.xdg_toplevel, app.output);
+    }
 
     // Initial commit to request configure event
     wl_surface_commit(app.surface);
@@ -298,7 +504,7 @@ int main(int argc, char *argv[]) {
 
     mpv_render_context_set_update_callback(app.mpv_gl, on_mpv_render_update, &app);
 
-    // Load file
+    // Load media file
     const char *cmd[] = {"loadfile", video_file, "replace", NULL};
     mpv_command_async(app.mpv, 0, cmd);
 
@@ -362,7 +568,21 @@ int main(int argc, char *argv[]) {
     if (app.egl_display) eglTerminate(app.egl_display);
     if (app.egl_window) wl_egl_window_destroy(app.egl_window);
     if (app.layer_surface) zwlr_layer_surface_v1_destroy(app.layer_surface);
+    if (app.xdg_toplevel) xdg_toplevel_destroy(app.xdg_toplevel);
+    if (app.xdg_surface) xdg_surface_destroy(app.xdg_surface);
+    if (app.xdg_wm_base) xdg_wm_base_destroy(app.xdg_wm_base);
+    if (app.layer_shell) zwlr_layer_shell_v1_destroy(app.layer_shell);
     if (app.surface) wl_surface_destroy(app.surface);
+
+    while (app.outputs) {
+        struct bound_output *next = app.outputs->next;
+        wl_output_destroy(app.outputs->output);
+        free(app.outputs);
+        app.outputs = next;
+    }
+
+    if (app.registry) wl_registry_destroy(app.registry);
+    if (app.compositor) wl_compositor_destroy(app.compositor);
     if (app.display) wl_display_disconnect(app.display);
 
     return 0;
