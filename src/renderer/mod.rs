@@ -74,8 +74,19 @@ impl RenderManager {
             .load_file_with_audio(&playable_file, audio_file.as_deref())
             .await?;
 
-        // Also update Noctalia's wallpaper to the preview image so lockscreen/desktop theme colors sync
-        if let Some(ref preview) = wallpaper.preview_path {
+        // Also update Noctalia's wallpaper (using high-res image if available, else preview)
+        let is_image = playable_file
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| {
+                let l = ext.to_lowercase();
+                l == "jpg" || l == "jpeg" || l == "png" || l == "webp" || l == "bmp"
+            })
+            .unwrap_or(false);
+
+        if is_image {
+            Self::sync_noctalia_wallpaper(monitor, &playable_file);
+        } else if let Some(ref preview) = wallpaper.preview_path {
             Self::sync_noctalia_wallpaper(monitor, preview);
         } else if wallpaper.folder_path.join("preview.jpg").exists() {
             let preview = wallpaper.folder_path.join("preview.jpg");
