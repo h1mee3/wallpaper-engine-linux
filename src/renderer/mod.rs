@@ -74,7 +74,7 @@ impl RenderManager {
             .load_file_with_audio(&playable_file, audio_file.as_deref())
             .await?;
 
-        // Also update Noctalia's wallpaper (using high-res image if available, else preview)
+        // Also update desktop wallpaper (using high-res image if available, else preview)
         let is_image = playable_file
             .extension()
             .and_then(|e| e.to_str())
@@ -85,12 +85,12 @@ impl RenderManager {
             .unwrap_or(false);
 
         if is_image {
-            Self::sync_noctalia_wallpaper(monitor, &playable_file);
+            Self::sync_desktop_wallpaper(monitor, &playable_file);
         } else if let Some(ref preview) = wallpaper.preview_path {
-            Self::sync_noctalia_wallpaper(monitor, preview);
+            Self::sync_desktop_wallpaper(monitor, preview);
         } else if wallpaper.folder_path.join("preview.jpg").exists() {
             let preview = wallpaper.folder_path.join("preview.jpg");
-            Self::sync_noctalia_wallpaper(monitor, &preview);
+            Self::sync_desktop_wallpaper(monitor, &preview);
         }
 
         self.current_wallpapers
@@ -99,8 +99,10 @@ impl RenderManager {
         Ok(())
     }
 
-    /// Notify Noctalia about the new wallpaper so its color scheme, theme, and greeter sync
-    fn sync_noctalia_wallpaper(monitor: &str, image_path: &Path) {
+    /// Synchronize wallpaper with the active desktop environment and Noctalia Shell
+    fn sync_desktop_wallpaper(monitor: &str, image_path: &Path) {
+        crate::compositor::Compositor::sync_wallpaper(monitor, image_path);
+
         let p_str = image_path.to_string_lossy().to_string();
         debug!("Syncing Noctalia wallpaper on {}: {}", monitor, p_str);
 
@@ -109,7 +111,6 @@ impl RenderManager {
             .args(["msg", "wallpaper-set", target_arg, &p_str])
             .output();
 
-        // Optionally trigger theme generation
         let _ = Command::new("noctalia")
             .args(["msg", "color-scheme-set", "wallpaper", "scheme-tonal-spot"])
             .output();

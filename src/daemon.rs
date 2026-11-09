@@ -7,8 +7,8 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
+use crate::compositor::{Compositor, CompositorEvent, Monitor};
 use crate::discovery::{Discovery, Wallpaper};
-use crate::hyprland::{HyprEvent, Hyprland, Monitor};
 use crate::ipc::{get_socket_path, IpcRequest, IpcResponse};
 use crate::renderer::RenderManager;
 use crate::watcher::SteamWatcher;
@@ -23,8 +23,8 @@ pub struct DaemonState {
 impl DaemonState {
     pub fn new() -> Self {
         let wallpapers = Discovery::discover_all(&[]);
-        let monitors = Hyprland::get_monitors().unwrap_or_else(|e| {
-            warn!("Could not fetch Hyprland monitors: {}", e);
+        let monitors = Compositor::get_monitors().unwrap_or_else(|e| {
+            warn!("Could not fetch displays: {}", e);
             vec![]
         });
 
@@ -38,10 +38,10 @@ impl DaemonState {
 
     pub fn rescan(&mut self) {
         self.wallpapers = Discovery::discover_all(&[]);
-        if let Ok(mons) = Hyprland::get_monitors() {
+        if let Ok(mons) = Compositor::get_monitors() {
             self.monitors = mons;
         }
-        info!("Rescanned library: {} wallpapers", self.wallpapers.len());
+        info!("Rescanned library: {} wallpapers, {} displays", self.wallpapers.len(), self.monitors.len());
     }
 
     /// Retrieve the exact resolution and coordinate offset for a monitor
@@ -83,9 +83,9 @@ impl DaemonState {
         let mon_target = monitor.unwrap_or("*");
         if mon_target == "*" {
             if self.monitors.is_empty() {
-                let (w, h, x, y) = self.get_monitor_geometry("DP-1");
+                let (w, h, x, y) = self.get_monitor_geometry("*");
                 self.render_manager
-                    .apply_wallpaper("DP-1", &wp, w, h, x, y)
+                    .apply_wallpaper("*", &wp, w, h, x, y)
                     .await?;
             } else {
                 for m in &self.monitors {
@@ -160,8 +160,8 @@ impl Daemon {
         info!("Starting wengine daemon on {:?}", socket_path);
         let listener = UnixListener::bind(&socket_path)?;
 
-        // Setup Hyprland window rules
-        Hyprland::setup_window_rules();
+        // Setup compositor window/layer rules
+        Compositor::setup_compositor_rules();
 
         let state = Arc::new(Mutex::new(DaemonState::new()));
 
@@ -169,17 +169,17 @@ impl Daemon {
         let state_watcher = Arc::clone(&state);
         let _watcher_handle = SteamWatcher::start(state_watcher);
 
-        // Start Hyprland event listener
-        let (hypr_tx, mut hypr_rx) = mpsc::unbounded_channel();
-        let _hypr_handle = Hyprland::start_event_listener(hypr_tx);
+        // Start unified compositor event listener (auto-pause on fullscreen, monitor hotplug)
+        let (comp_tx, mut comp_rx) = mpsc::unbounded_channel();
+        let _comp_handle = Compositor::start_event_listener(comp_tx);
 
-        // Hyprland event handler loop
-        let state_hypr = Arc::clone(&state);
+        // Compositor event handler loop
+        let state_comp = Arc::clone(&state);
         tokio::spawn(async move {
-            while let Some(event) = hypr_rx.recv().await {
+            while let Some(event) = comp_rx.recv().await {
                 match event {
-                    HyprEvent::Fullscreen(is_full) => {
-                        let mut s = state_hypr.lock().await;
+                    CompositorEvent::Fullscreen(is_full) => {
+                        let mut s = state_comp.lock().await;
                         if is_full {
                             info!("Fullscreen active: pausing wallpapers");
                             let _ = s.render_manager.pause_all().await;
@@ -188,18 +188,18 @@ impl Daemon {
                             let _ = s.render_manager.resume_all().await;
                         }
                     }
-                    HyprEvent::MonitorAdded(name) => {
+                    CompositorEvent::MonitorAdded(name) => {
                         info!("Monitor connected: {}", name);
-                        let mut s = state_hypr.lock().await;
-                        if let Ok(mons) = Hyprland::get_monitors() {
+                        let mut s = state_comp.lock().await;
+                        if let Ok(mons) = Compositor::get_monitors() {
                             s.monitors = mons;
                         }
-                        Hyprland::setup_window_rules();
+                        Compositor::setup_compositor_rules();
                     }
-                    HyprEvent::MonitorRemoved(name) => {
+                    CompositorEvent::MonitorRemoved(name) => {
                         info!("Monitor disconnected: {}", name);
-                        let mut s = state_hypr.lock().await;
-                        if let Ok(mons) = Hyprland::get_monitors() {
+                        let mut s = state_comp.lock().await;
+                        if let Ok(mons) = Compositor::get_monitors() {
                             s.monitors = mons;
                         }
                     }
@@ -270,6 +270,8 @@ impl Daemon {
                     "volume": s.render_manager.volume(),
                     "muted": s.render_manager.is_muted(),
                     "scaling_mode": s.render_manager.scaling_mode(),
+                    "desktop_environment": Compositor::current_de().name(),
+                    "supports_layer_shell": Compositor::current_de().supports_layer_shell(),
                     "active_wallpapers": active,
                     "monitors": s.monitors,
                     "total_wallpapers": s.wallpapers.len(),
@@ -315,7 +317,9 @@ impl Daemon {
                 }
             }
             IpcRequest::Next { monitor } => {
-                let mon = monitor.unwrap_or_else(|| "DP-1".to_string());
+                let mon = monitor.unwrap_or_else(|| {
+                    s.monitors.first().map(|m| m.name.clone()).unwrap_or_else(|| "*".to_string())
+                });
                 match s.cycle_wallpaper(&mon, 1).await {
                     Ok(Some(wp)) => IpcResponse::Ok { data: json!(wp) },
                     Ok(None) => IpcResponse::Error {
@@ -327,7 +331,9 @@ impl Daemon {
                 }
             }
             IpcRequest::Prev { monitor } => {
-                let mon = monitor.unwrap_or_else(|| "DP-1".to_string());
+                let mon = monitor.unwrap_or_else(|| {
+                    s.monitors.first().map(|m| m.name.clone()).unwrap_or_else(|| "*".to_string())
+                });
                 match s.cycle_wallpaper(&mon, -1).await {
                     Ok(Some(wp)) => IpcResponse::Ok { data: json!(wp) },
                     Ok(None) => IpcResponse::Error {
@@ -339,7 +345,9 @@ impl Daemon {
                 }
             }
             IpcRequest::Random { monitor } => {
-                let mon = monitor.unwrap_or_else(|| "DP-1".to_string());
+                let mon = monitor.unwrap_or_else(|| {
+                    s.monitors.first().map(|m| m.name.clone()).unwrap_or_else(|| "*".to_string())
+                });
                 match s.random_wallpaper(&mon).await {
                     Ok(Some(wp)) => IpcResponse::Ok { data: json!(wp) },
                     Ok(None) => IpcResponse::Error {

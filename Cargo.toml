@@ -3,7 +3,7 @@ name = "wengine"
 version = "0.1.0"
 edition = "2021"
 authors = ["hime"]
-description = "Wallpaper Engine Linux Layer for Hyprland, Noctalia, and Wayland"
+description = "Wallpaper Engine Linux Layer for any Wayland DE/WM (Hyprland, Sway, KDE, GNOME, River, Niri, Cosmic, etc.)"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "cargo"] }

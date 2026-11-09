@@ -64,18 +64,18 @@ impl MpvInstance {
     }
 
     pub fn find_layer_player_bin() -> PathBuf {
-        if let Some(home) = dirs::home_dir() {
-            let p = home.join(".local/bin/wengine-layer-player");
-            if p.exists() {
-                return p;
-            }
-        }
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
                 let p = parent.join("wengine-layer-player");
                 if p.exists() {
                     return p;
                 }
+            }
+        }
+        if let Some(home) = dirs::home_dir() {
+            let p = home.join(".local/bin/wengine-layer-player");
+            if p.exists() {
+                return p;
             }
         }
         PathBuf::from("wengine-layer-player")

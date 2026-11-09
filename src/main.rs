@@ -1,4 +1,5 @@
 mod cli;
+mod compositor;
 mod daemon;
 mod discovery;
 mod hyprland;
@@ -136,6 +137,10 @@ async fn main() -> Result<()> {
                         let total = data.get("total_wallpapers").and_then(|v| v.as_u64()).unwrap_or(0);
                         let scaling = data.get("scaling_mode").and_then(|v| v.as_str()).unwrap_or("fill");
 
+                        let de = data.get("desktop_environment").and_then(|v| v.as_str()).unwrap_or("Wayland");
+                        let layer_shell = data.get("supports_layer_shell").and_then(|v| v.as_bool()).unwrap_or(true);
+
+                        println!("   Desktop:   \x1b[34;1m{}\x1b[0m (Backend: {})", de, if layer_shell { "wlr-layer-shell" } else { "xdg-shell" });
                         println!("   Playback:  {}", if paused { "\x1b[33mPaused\x1b[0m" } else { "\x1b[32mPlaying\x1b[0m" });
                         println!("   Scaling:   \x1b[35;1m{}\x1b[0m (fill / fit / stretch)", scaling);
                         println!("   Volume:    {}% (Muted: {})", volume, muted);
