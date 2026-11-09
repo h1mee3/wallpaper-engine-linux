@@ -226,6 +226,8 @@ int main(int argc, char *argv[]) {
         ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
         ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT
     );
+    // Explicit 0, 0 size for anchored full-monitor surfaces
+    zwlr_layer_surface_v1_set_size(app.layer_surface, 0, 0);
 
     // Exclusive zone -1: true background, never reserve layout space
     zwlr_layer_surface_v1_set_exclusive_zone(app.layer_surface, -1);
@@ -256,9 +258,15 @@ int main(int argc, char *argv[]) {
     mpv_set_option_string(app.mpv, "vo", "libmpv");
     mpv_set_option_string(app.mpv, "hwdec", "auto-safe");
     mpv_set_option_string(app.mpv, "loop-file", "inf");
-    mpv_set_option_string(app.mpv, "no-audio", "");
+    mpv_set_option_string(app.mpv, "image-display-duration", "inf");
+    mpv_set_option_string(app.mpv, "keepaspect-window", "no");
+    mpv_set_option_string(app.mpv, "video-unscaled", "no");
     mpv_set_option_string(app.mpv, "really-quiet", "");
     mpv_set_option_string(app.mpv, "panscan", "1.0");
+    mpv_set_option_string(app.mpv, "scale", "spline36");
+    mpv_set_option_string(app.mpv, "cscale", "spline36");
+    mpv_set_option_string(app.mpv, "dscale", "mitchell");
+    mpv_set_option_string(app.mpv, "correct-pts", "yes");
 
     if (ipc_socket && strlen(ipc_socket) > 0) {
         unlink(ipc_socket);

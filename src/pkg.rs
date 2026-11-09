@@ -129,4 +129,297 @@ impl PkgArchive {
 
         Ok(())
     }
+
+    /// Extract the best playable visual asset (4K/1080p texture, video, gif, or image) from the PKG to out_dir
+    pub fn extract_playable_asset<P: AsRef<Path>>(&self, out_dir: P) -> Result<Option<PathBuf>> {
+        let dest = out_dir.as_ref();
+        std::fs::create_dir_all(dest)?;
+
+        // Check if an asset was already extracted and cached previously
+        for ext in &["jpg", "jpeg", "png", "mp4", "webm", "gif", "bmp"] {
+            let candidate = dest.join(format!("wallpaper.{}", ext));
+            if candidate.exists() {
+                if let Ok(meta) = candidate.metadata() {
+                    if meta.len() > 1024 {
+                        return Ok(Some(candidate));
+                    }
+                }
+            }
+        }
+
+        // 1. Look for embedded video files (.mp4, .webm)
+        for entry in &self.entries {
+            let lower = entry.name.to_lowercase();
+            if lower.ends_with(".mp4") || lower.ends_with(".webm") {
+                let out_file = dest.join("wallpaper.mp4");
+                let data = self.read_entry(entry)?;
+                std::fs::write(&out_file, data)?;
+                return Ok(Some(out_file));
+            }
+        }
+
+        // 2. Look for high-resolution texture files (.tex) in materials/
+        // Sort entries by size descending so we inspect the largest artwork/background first
+        let mut tex_entries: Vec<&PkgEntry> = self
+            .entries
+            .iter()
+            .filter(|e| e.name.to_lowercase().ends_with(".tex"))
+            .collect();
+        tex_entries.sort_by(|a, b| b.length.cmp(&a.length));
+
+        for entry in tex_entries {
+            if entry.length < 1024 {
+                continue;
+            }
+
+            let data = self.read_entry(entry)?;
+
+            // 2a. Check for embedded JPEG (0xFF, 0xD8, 0xFF)
+            if let Some(pos) = find_subsequence(&data, b"\xff\xd8\xff") {
+                let out_file = dest.join("wallpaper.jpg");
+                std::fs::write(&out_file, &data[pos..])?;
+                return Ok(Some(out_file));
+            }
+
+            // 2b. Check for embedded PNG (0x89, 'P', 'N', 'G')
+            if let Some(pos) = find_subsequence(&data, b"\x89PNG") {
+                let out_file = dest.join("wallpaper.png");
+                std::fs::write(&out_file, &data[pos..])?;
+                return Ok(Some(out_file));
+            }
+
+            // 2c. Check for embedded MP4 video (ftyp marker)
+            if let Some(ftyp_pos) = find_subsequence(&data, b"ftyp") {
+                if ftyp_pos >= 4 {
+                    let out_file = dest.join("wallpaper.mp4");
+                    std::fs::write(&out_file, &data[ftyp_pos - 4..])?;
+                    return Ok(Some(out_file));
+                }
+            }
+
+            // 2d. Check for TEXB block with LZ4-compressed RGBA texture data
+            if let Some(tb_pos) = find_subsequence(&data, b"TEXB") {
+                if let Some(out_bmp) = try_extract_texb_rgba(&data[tb_pos..], dest) {
+                    return Ok(Some(out_bmp));
+                }
+            }
+        }
+
+        // 3. Look for embedded animated GIF
+        for entry in &self.entries {
+            let lower = entry.name.to_lowercase();
+            if lower.ends_with(".gif") {
+                let out_file = dest.join("wallpaper.gif");
+                let data = self.read_entry(entry)?;
+                std::fs::write(&out_file, data)?;
+                return Ok(Some(out_file));
+            }
+        }
+
+        // 4. Look for standard image files (.png, .jpg, .jpeg, .webp)
+        for entry in &self.entries {
+            let lower = entry.name.to_lowercase();
+            if lower.ends_with(".png")
+                || lower.ends_with(".jpg")
+                || lower.ends_with(".jpeg")
+                || lower.ends_with(".webp")
+            {
+                let ext = Path::new(&entry.name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("png");
+                let out_file = dest.join(format!("wallpaper.{}", ext));
+                let data = self.read_entry(entry)?;
+                std::fs::write(&out_file, data)?;
+                return Ok(Some(out_file));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Extract an audio track from the PKG archive if present (.mp3, .ogg, .wav, .flac)
+    pub fn extract_audio_asset<P: AsRef<Path>>(&self, out_dir: P) -> Result<Option<PathBuf>> {
+        let dest = out_dir.as_ref();
+        std::fs::create_dir_all(dest)?;
+
+        for entry in &self.entries {
+            let lower = entry.name.to_lowercase();
+            if lower.ends_with(".mp3") || lower.ends_with(".ogg") || lower.ends_with(".wav") || lower.ends_with(".flac") {
+                if let Some(file_name) = Path::new(&entry.name).file_name() {
+                    let out_file = dest.join(file_name);
+                    if !out_file.exists() {
+                        let data = self.read_entry(entry)?;
+                        std::fs::write(&out_file, data)?;
+                    }
+                    return Ok(Some(out_file));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+/// Locate a byte sequence inside a byte buffer
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Try to parse and extract a TEXB block containing raw or LZ4-compressed RGBA data
+fn try_extract_texb_rgba(tb_data: &[u8], dest: &Path) -> Option<PathBuf> {
+    // Header format: "TEXBxxxx\0" (9 bytes)
+    if tb_data.len() < 37 {
+        return None;
+    }
+    let pos = 9;
+    let _mipmaps = u32::from_le_bytes(tb_data[pos..pos + 4].try_into().ok()?);
+    let _fmt = u32::from_le_bytes(tb_data[pos + 4..pos + 8].try_into().ok()?);
+    let w = u32::from_le_bytes(tb_data[pos + 8..pos + 12].try_into().ok()?);
+    let h = u32::from_le_bytes(tb_data[pos + 12..pos + 16].try_into().ok()?);
+    let _frames = u32::from_le_bytes(tb_data[pos + 16..pos + 20].try_into().ok()?);
+    let uncompressed_size = u32::from_le_bytes(tb_data[pos + 20..pos + 24].try_into().ok()?) as usize;
+    let compressed_size = u32::from_le_bytes(tb_data[pos + 24..pos + 28].try_into().ok()?) as usize;
+
+    let expected_len = (w as usize) * (h as usize) * 4;
+    if uncompressed_size != expected_len || w < 200 || h < 200 {
+        return None;
+    }
+
+    let payload_start = pos + 28;
+    if payload_start + compressed_size > tb_data.len() {
+        return None;
+    }
+    let payload = &tb_data[payload_start..payload_start + compressed_size];
+
+    let decompressed = if compressed_size == uncompressed_size {
+        payload.to_vec()
+    } else {
+        lz4_decompress_block(payload, uncompressed_size)?
+    };
+
+    let out_bmp = dest.join("wallpaper.bmp");
+    if write_bmp_rgba(&out_bmp, w, h, &decompressed).is_ok() {
+        Some(out_bmp)
+    } else {
+        None
+    }
+}
+
+/// Decompress standard LZ4 block format without external crate dependencies
+fn lz4_decompress_block(src: &[u8], uncompressed_size: usize) -> Option<Vec<u8>> {
+    let mut dst = Vec::with_capacity(uncompressed_size);
+    let mut ip = 0;
+    let src_len = src.len();
+
+    while ip < src_len {
+        let token = src[ip];
+        ip += 1;
+
+        let mut lit_len = (token >> 4) as usize;
+        if lit_len == 15 {
+            while ip < src_len {
+                let s = src[ip] as usize;
+                ip += 1;
+                lit_len += s;
+                if s != 255 {
+                    break;
+                }
+            }
+        }
+
+        if ip + lit_len > src_len {
+            let take = src_len.saturating_sub(ip);
+            dst.extend_from_slice(&src[ip..ip + take]);
+            break;
+        }
+
+        dst.extend_from_slice(&src[ip..ip + lit_len]);
+        ip += lit_len;
+
+        if ip >= src_len || dst.len() >= uncompressed_size {
+            break;
+        }
+
+        if ip + 2 > src_len {
+            break;
+        }
+        let offset = (src[ip] as usize) | ((src[ip + 1] as usize) << 8);
+        ip += 2;
+        if offset == 0 || offset > dst.len() {
+            break;
+        }
+
+        let mut match_len = ((token & 0x0f) as usize) + 4;
+        if (token & 0x0f) == 15 {
+            while ip < src_len {
+                let s = src[ip] as usize;
+                ip += 1;
+                match_len += s;
+                if s != 255 {
+                    break;
+                }
+            }
+        }
+
+        for _ in 0..match_len {
+            let b = dst[dst.len() - offset];
+            dst.push(b);
+        }
+    }
+
+    if dst.len() == uncompressed_size {
+        Some(dst)
+    } else {
+        None
+    }
+}
+
+/// Write 32-bit top-down BMP from raw RGBA pixel buffer
+fn write_bmp_rgba(dest_path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let expected_len = (w as usize) * (h as usize) * 4;
+    if rgba.len() < expected_len {
+        anyhow::bail!("Insufficient pixel data for BMP");
+    }
+
+    let file_size = 54 + expected_len;
+    let mut file = File::create(dest_path)?;
+
+    // BMP header (14 bytes)
+    let mut bmp_header = [0u8; 14];
+    bmp_header[0] = b'B';
+    bmp_header[1] = b'M';
+    bmp_header[2..6].copy_from_slice(&(file_size as u32).to_le_bytes());
+    bmp_header[10..14].copy_from_slice(&54u32.to_le_bytes());
+
+    // DIB header BITMAPINFOHEADER (40 bytes)
+    let mut dib_header = [0u8; 40];
+    dib_header[0..4].copy_from_slice(&40u32.to_le_bytes());
+    dib_header[4..8].copy_from_slice(&(w as i32).to_le_bytes());
+    dib_header[8..12].copy_from_slice(&(-(h as i32)).to_le_bytes()); // negative height = top-down
+    dib_header[12..14].copy_from_slice(&1u16.to_le_bytes()); // 1 color plane
+    dib_header[14..16].copy_from_slice(&32u16.to_le_bytes()); // 32 bpp
+    dib_header[16..20].copy_from_slice(&0u32.to_le_bytes()); // BI_RGB (uncompressed)
+    dib_header[20..24].copy_from_slice(&(expected_len as u32).to_le_bytes());
+
+    file.write_all(&bmp_header)?;
+    file.write_all(&dib_header)?;
+
+    // Convert RGBA to BGRA
+    let mut bgra = vec![0u8; expected_len];
+    for (src_chunk, dst_chunk) in rgba[..expected_len].chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
+        dst_chunk[0] = src_chunk[2]; // B
+        dst_chunk[1] = src_chunk[1]; // G
+        dst_chunk[2] = src_chunk[0]; // R
+        dst_chunk[3] = src_chunk[3]; // A
+    }
+
+    file.write_all(&bgra)?;
+    Ok(())
 }
