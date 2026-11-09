@@ -256,7 +256,9 @@ int main(int argc, char *argv[]) {
     mpv_set_option_string(app.mpv, "vo", "libmpv");
     mpv_set_option_string(app.mpv, "hwdec", "auto-safe");
     mpv_set_option_string(app.mpv, "loop-file", "inf");
-    mpv_set_option_string(app.mpv, "no-audio", "");
+    mpv_set_option_string(app.mpv, "image-display-duration", "inf");
+    mpv_set_option_string(app.mpv, "keepaspect-window", "no");
+    mpv_set_option_string(app.mpv, "video-unscaled", "no");
     mpv_set_option_string(app.mpv, "really-quiet", "");
     mpv_set_option_string(app.mpv, "panscan", "1.0");
 

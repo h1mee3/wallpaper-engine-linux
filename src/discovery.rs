@@ -38,6 +38,121 @@ pub struct Wallpaper {
     pub properties: Option<HashMap<String, serde_json::Value>>,
 }
 
+impl Wallpaper {
+    /// Resolve the best playable media asset for any wallpaper type (Video, Scene, Web)
+    pub fn resolve_playable_path(&self) -> Option<PathBuf> {
+        // If it's already a valid video file
+        if self.wallpaper_type == WallpaperType::Video && self.full_file_path.exists() {
+            return Some(self.full_file_path.clone());
+        }
+
+        // 1. Check for any video files in the wallpaper directory (.mp4, .webm, .mkv)
+        if let Ok(entries) = std::fs::read_dir(&self.folder_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if ext_lower == "mp4" || ext_lower == "webm" || ext_lower == "mkv" {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+
+        // 2. Check for animated preview.gif
+        let gif_path = self.folder_path.join("preview.gif");
+        if gif_path.exists() {
+            return Some(gif_path);
+        }
+
+        // 3. Check if scene.pkg has extractable video, gif, or image
+        let pkg_path = self.folder_path.join("scene.pkg");
+        if pkg_path.exists() {
+            if let Ok(archive) = crate::pkg::PkgArchive::open(&pkg_path) {
+                if let Some(cache_dir) = dirs::cache_dir() {
+                    let out_dir = cache_dir.join("wengine").join("scenes").join(&self.id);
+                    if let Ok(Some(extracted)) = archive.extract_playable_asset(&out_dir) {
+                        return Some(extracted);
+                    }
+                }
+            }
+        }
+
+        // 4. Check for high-res preview image
+        if let Some(ref p) = self.preview_path {
+            if p.exists() {
+                return Some(p.clone());
+            }
+        }
+
+        for ext in &["png", "jpg", "jpeg", "webp"] {
+            let p = self.folder_path.join(format!("preview.{}", ext));
+            if p.exists() {
+                return Some(p);
+            }
+        }
+
+        // 5. Fallback: if full_file_path itself is an image or media
+        if self.full_file_path.exists() {
+            if let Some(ext) = self.full_file_path.extension().and_then(|e| e.to_str()) {
+                let ext_lower = ext.to_lowercase();
+                if ["mp4", "webm", "gif", "png", "jpg", "jpeg", "webp"].contains(&ext_lower.as_str()) {
+                    return Some(self.full_file_path.clone());
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Resolve an audio track for this wallpaper if present (in folder, audio/ subfolder, or scene.pkg)
+    pub fn resolve_audio_path(&self) -> Option<PathBuf> {
+        let audio_extensions = ["ogg", "mp3", "wav", "flac"];
+
+        // 1. Direct folder scan
+        if let Ok(entries) = std::fs::read_dir(&self.folder_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if audio_extensions.contains(&ext.to_lowercase().as_str()) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+
+        // 2. Check "audio" subfolder
+        let audio_sub = self.folder_path.join("audio");
+        if audio_sub.exists() {
+            if let Ok(entries) = std::fs::read_dir(&audio_sub) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if audio_extensions.contains(&ext.to_lowercase().as_str()) {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Extract from scene.pkg if present
+        let pkg_path = self.folder_path.join("scene.pkg");
+        if pkg_path.exists() {
+            if let Ok(archive) = crate::pkg::PkgArchive::open(&pkg_path) {
+                if let Some(cache_dir) = dirs::cache_dir() {
+                    let out_dir = cache_dir.join("wengine").join("scenes").join(&self.id);
+                    if let Ok(Some(extracted)) = archive.extract_audio_asset(&out_dir) {
+                        return Some(extracted);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
 /// Raw representation of Wallpaper Engine `project.json`
 #[derive(Debug, Deserialize)]
 struct RawProjectJson {
