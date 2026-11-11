@@ -1,4 +1,5 @@
 pub mod mpv_player;
+pub mod web_player;
 
 use anyhow::{Context, Result};
 pub use mpv_player::ScalingMode;
@@ -9,9 +10,45 @@ use tracing::{debug, info};
 
 use crate::discovery::Wallpaper;
 use mpv_player::MpvInstance;
+use web_player::WebInstance;
+
+pub enum PlayerBackend {
+    Video(MpvInstance),
+    Web(WebInstance),
+}
+
+impl PlayerBackend {
+    pub async fn set_pause(&mut self, paused: bool) -> Result<()> {
+        match self {
+            PlayerBackend::Video(inst) => inst.set_pause(paused).await,
+            PlayerBackend::Web(inst) => inst.set_pause(paused).await,
+        }
+    }
+
+    pub async fn set_volume(&mut self, volume: u32) -> Result<()> {
+        match self {
+            PlayerBackend::Video(inst) => inst.set_volume(volume).await,
+            PlayerBackend::Web(inst) => inst.set_volume(volume).await,
+        }
+    }
+
+    pub async fn set_mute(&mut self, mute: bool) -> Result<()> {
+        match self {
+            PlayerBackend::Video(inst) => inst.set_mute(mute).await,
+            PlayerBackend::Web(inst) => inst.set_mute(mute).await,
+        }
+    }
+
+    pub fn stop(&mut self) {
+        match self {
+            PlayerBackend::Video(inst) => inst.stop(),
+            PlayerBackend::Web(inst) => inst.stop(),
+        }
+    }
+}
 
 pub struct RenderManager {
-    instances: HashMap<String, MpvInstance>,
+    backends: HashMap<String, PlayerBackend>,
     current_wallpapers: HashMap<String, Wallpaper>,
     global_paused: bool,
     global_volume: u32,
@@ -22,7 +59,7 @@ pub struct RenderManager {
 impl RenderManager {
     pub fn new() -> Self {
         Self {
-            instances: HashMap::new(),
+            backends: HashMap::new(),
             current_wallpapers: HashMap::new(),
             global_paused: false,
             global_volume: 50,
@@ -46,47 +83,84 @@ impl RenderManager {
             wallpaper.title, wallpaper.wallpaper_type, monitor, width, height, x, y
         );
 
-        // Resolve the best playable media asset (video, animated gif, or high-res image)
-        let playable_file = wallpaper.resolve_playable_path().with_context(|| {
-            format!(
-                "No playable media found for wallpaper '{}' ({})",
-                wallpaper.title, wallpaper.id
-            )
-        })?;
-
-        let audio_file = wallpaper.resolve_audio_path();
-
-        let scaling = self.global_scaling;
         let volume = self.global_volume;
         let muted = self.global_muted;
+        let paused = self.global_paused;
 
-        let instance = self
-            .instances
-            .entry(monitor.to_string())
-            .or_insert_with(|| MpvInstance::new(monitor, width, height, x, y));
+        if wallpaper.is_web() {
+            let web_file = wallpaper.resolve_web_path().with_context(|| {
+                format!(
+                    "No web entrypoint found for interactive wallpaper '{}' ({})",
+                    wallpaper.title, wallpaper.id
+                )
+            })?;
 
-        // Update geometry in case monitor configuration changed
-        instance.update_geometry(width, height, x, y);
-        instance.set_scaling_mode(scaling).await?;
-        instance.set_volume(volume).await?;
-        instance.set_mute(muted).await?;
-        instance
-            .load_file_with_audio(&playable_file, audio_file.as_deref())
-            .await?;
+            let needs_new_backend = match self.backends.get(monitor) {
+                Some(PlayerBackend::Web(_)) => false,
+                _ => true,
+            };
 
-        // Also update desktop wallpaper (using high-res image if available, else preview)
-        let is_image = playable_file
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|ext| {
-                let l = ext.to_lowercase();
-                l == "jpg" || l == "jpeg" || l == "png" || l == "webp" || l == "bmp"
-            })
-            .unwrap_or(false);
+            if needs_new_backend {
+                if let Some(mut old) = self.backends.remove(monitor) {
+                    old.stop();
+                }
+                self.backends.insert(
+                    monitor.to_string(),
+                    PlayerBackend::Web(WebInstance::new(monitor, width, height, x, y)),
+                );
+            }
 
-        if is_image {
-            Self::sync_desktop_wallpaper(monitor, &playable_file);
-        } else if let Some(ref preview) = wallpaper.preview_path {
+            if let Some(PlayerBackend::Web(ref mut inst)) = self.backends.get_mut(monitor) {
+                inst.update_geometry(width, height, x, y);
+                inst.load_file(&web_file).await?;
+                inst.set_volume(volume).await?;
+                inst.set_mute(muted).await?;
+                if paused {
+                    inst.set_pause(true).await?;
+                }
+            }
+        } else {
+            // Resolve the best playable media asset (video, animated gif, or high-res image)
+            let playable_file = wallpaper.resolve_playable_path().with_context(|| {
+                format!(
+                    "No playable media found for wallpaper '{}' ({})",
+                    wallpaper.title, wallpaper.id
+                )
+            })?;
+
+            let audio_file = wallpaper.resolve_audio_path();
+            let scaling = self.global_scaling;
+
+            let needs_new_backend = match self.backends.get(monitor) {
+                Some(PlayerBackend::Video(_)) => false,
+                _ => true,
+            };
+
+            if needs_new_backend {
+                if let Some(mut old) = self.backends.remove(monitor) {
+                    old.stop();
+                }
+                self.backends.insert(
+                    monitor.to_string(),
+                    PlayerBackend::Video(MpvInstance::new(monitor, width, height, x, y)),
+                );
+            }
+
+            if let Some(PlayerBackend::Video(ref mut inst)) = self.backends.get_mut(monitor) {
+                inst.update_geometry(width, height, x, y);
+                inst.set_scaling_mode(scaling).await?;
+                inst.set_volume(volume).await?;
+                inst.set_mute(muted).await?;
+                inst.load_file_with_audio(&playable_file, audio_file.as_deref())
+                    .await?;
+                if paused {
+                    inst.set_pause(true).await?;
+                }
+            }
+        }
+
+        // Synchronize desktop preview wallpaper (Noctalia / Compositor)
+        if let Some(ref preview) = wallpaper.preview_path {
             Self::sync_desktop_wallpaper(monitor, preview);
         } else if wallpaper.folder_path.join("preview.jpg").exists() {
             let preview = wallpaper.folder_path.join("preview.jpg");
@@ -119,18 +193,20 @@ impl RenderManager {
     /// Set scaling mode across all instances
     pub async fn set_scaling_mode(&mut self, mode: ScalingMode) -> Result<()> {
         self.global_scaling = mode;
-        for inst in self.instances.values_mut() {
-            inst.set_scaling_mode(mode).await?;
+        for backend in self.backends.values_mut() {
+            if let PlayerBackend::Video(ref mut inst) = backend {
+                inst.set_scaling_mode(mode).await?;
+            }
         }
         Ok(())
     }
 
-    /// Pause all running wallpaper instances (e.g. when entering fullscreen in a game)
+    /// Pause all running wallpaper instances (e.g. when entering fullscreen or covered by apps)
     pub async fn pause_all(&mut self) -> Result<()> {
         self.global_paused = true;
-        for (mon, inst) in &mut self.instances {
+        for (mon, backend) in &mut self.backends {
             debug!("Pausing wallpaper playback on monitor {}", mon);
-            inst.set_pause(true).await?;
+            backend.set_pause(true).await?;
         }
         Ok(())
     }
@@ -138,9 +214,9 @@ impl RenderManager {
     /// Resume all running wallpaper instances
     pub async fn resume_all(&mut self) -> Result<()> {
         self.global_paused = false;
-        for (mon, inst) in &mut self.instances {
+        for (mon, backend) in &mut self.backends {
             debug!("Resuming wallpaper playback on monitor {}", mon);
-            inst.set_pause(false).await?;
+            backend.set_pause(false).await?;
         }
         Ok(())
     }
@@ -159,8 +235,8 @@ impl RenderManager {
     /// Set volume across all instances
     pub async fn set_volume(&mut self, volume: u32) -> Result<()> {
         self.global_volume = volume.min(100);
-        for inst in self.instances.values_mut() {
-            inst.set_volume(self.global_volume).await?;
+        for backend in self.backends.values_mut() {
+            backend.set_volume(self.global_volume).await?;
         }
         Ok(())
     }
@@ -168,8 +244,8 @@ impl RenderManager {
     /// Set mute across all instances
     pub async fn set_mute(&mut self, mute: bool) -> Result<()> {
         self.global_muted = mute;
-        for inst in self.instances.values_mut() {
-            inst.set_mute(self.global_muted).await?;
+        for backend in self.backends.values_mut() {
+            backend.set_mute(self.global_muted).await?;
         }
         Ok(())
     }
@@ -201,8 +277,8 @@ impl RenderManager {
 
     /// Terminate all instances
     pub fn stop_all(&mut self) {
-        for (_, mut inst) in self.instances.drain() {
-            inst.stop();
+        for (_, mut backend) in self.backends.drain() {
+            backend.stop();
         }
     }
 }
