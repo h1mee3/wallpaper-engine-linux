@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+      http://www.kde.org/standards/kcfg/1.0/kcfg.xsd" >
+  <kcfgfile name=""/>
+  <group name="General">
+    <entry name="VideoPath" type="String">
+      <label>Path to the video wallpaper file</label>
+      <default></default>
+    </entry>
+    <entry name="ImagePath" type="String">
+      <label>Fallback or static image path</label>
+      <default></default>
+    </entry>
+    <entry name="ScalingMode" type="String">
+      <label>Scaling mode: fill, fit, stretch</label>
+      <default>fill</default>
+    </entry>
+    <entry name="Muted" type="bool">
+      <label>Whether audio is muted</label>
+      <default>true</default>
+    </entry>
+    <entry name="Volume" type="int">
+      <label>Volume level 0-100</label>
+      <default>50</default>
+    </entry>
+    <entry name="Paused" type="bool">
+      <label>Whether playback is paused</label>
+      <default>false</default>
+    </entry>
+  </group>
+</kcfg>

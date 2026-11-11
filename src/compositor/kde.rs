@@ -11,6 +11,179 @@ use super::monitor::Monitor;
 pub struct Kde;
 
 impl Kde {
+    pub const PLUGIN_ID: &'static str = "org.kde.plasma.wengine";
+
+    /// Ensure the native Plasma wallpaper plugin is installed into ~/.local/share/plasma/wallpapers/
+    pub fn ensure_wallpaper_plugin() -> Result<()> {
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let base_dir = home.join(".local/share/plasma/wallpapers").join(Self::PLUGIN_ID);
+        let config_dir = base_dir.join("contents/config");
+        let ui_dir = base_dir.join("contents/ui");
+
+        std::fs::create_dir_all(&config_dir)?;
+        std::fs::create_dir_all(&ui_dir)?;
+
+        let metadata_path = base_dir.join("metadata.json");
+        let xml_path = config_dir.join("main.xml");
+        let qml_path = ui_dir.join("main.qml");
+
+        const METADATA_JSON: &str = include_str!("../../assets/plasma-wallpaper/org.kde.plasma.wengine/metadata.json");
+        const MAIN_XML: &str = include_str!("../../assets/plasma-wallpaper/org.kde.plasma.wengine/contents/config/main.xml");
+        const MAIN_QML: &str = include_str!("../../assets/plasma-wallpaper/org.kde.plasma.wengine/contents/ui/main.qml");
+
+        if !metadata_path.exists() || std::fs::read_to_string(&metadata_path).unwrap_or_default() != METADATA_JSON {
+            std::fs::write(&metadata_path, METADATA_JSON)?;
+        }
+
+        if !xml_path.exists() || std::fs::read_to_string(&xml_path).unwrap_or_default() != MAIN_XML {
+            std::fs::write(&xml_path, MAIN_XML)?;
+        }
+
+        if !qml_path.exists() || std::fs::read_to_string(&qml_path).unwrap_or_default() != MAIN_QML {
+            std::fs::write(&qml_path, MAIN_QML)?;
+        }
+
+        Ok(())
+    }
+
+    /// Execute a JavaScript snippet in plasmashell via DBus evaluateScript
+    pub fn evaluate_script(script: &str) -> Result<String> {
+        let output = Command::new("qdbus")
+            .args(["org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell.evaluateScript", script])
+            .output()
+            .context("Failed to run qdbus evaluateScript")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "evaluateScript failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Apply live video or static wallpaper on KDE Plasma desktops
+    pub fn apply_wallpaper(
+        monitor: &str,
+        video_path: Option<&std::path::Path>,
+        image_path: Option<&std::path::Path>,
+        scaling_mode: &str,
+        muted: bool,
+        volume: u32,
+    ) -> Result<()> {
+        Self::ensure_wallpaper_plugin()?;
+
+        let video_str = video_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        let image_str = image_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+
+        let video_js = serde_json::to_string(&video_str)?;
+        let image_js = serde_json::to_string(&image_str)?;
+        let scaling_js = serde_json::to_string(scaling_mode)?;
+
+        let screen_match = if monitor == "*" || monitor.is_empty() {
+            "true".to_string()
+        } else if let Ok(idx) = monitor.parse::<i32>() {
+            format!("d[i].screen === {}", idx)
+        } else if let Ok(mons) = Self::get_monitors() {
+            if let Some(pos) = mons.iter().position(|m| m.name == monitor) {
+                format!("d[i].screen === {}", pos)
+            } else {
+                "true".to_string()
+            }
+        } else {
+            "true".to_string()
+        };
+
+        let script = format!(
+            r#"var d = desktops();
+for (var i = 0; i < d.length; i++) {{
+    if ({screen_match}) {{
+        d[i].wallpaperPlugin = "{plugin}";
+        d[i].currentConfigGroup = ["Wallpaper", "{plugin}", "General"];
+        d[i].writeConfig("VideoPath", {video_js});
+        d[i].writeConfig("ImagePath", {image_js});
+        d[i].writeConfig("ScalingMode", {scaling_js});
+        d[i].writeConfig("Muted", {muted});
+        d[i].writeConfig("Volume", {volume});
+        d[i].writeConfig("Paused", false);
+        d[i].reloadConfig();
+    }}
+}}"#,
+            screen_match = screen_match,
+            plugin = Self::PLUGIN_ID,
+            video_js = video_js,
+            image_js = image_js,
+            scaling_js = scaling_js,
+            muted = muted,
+            volume = volume,
+        );
+
+        Self::evaluate_script(&script)?;
+        info!("Applied wallpaper to KDE Plasma desktops (monitor: '{}', video: '{}', image: '{}')", monitor, video_str, image_str);
+        Ok(())
+    }
+
+    /// Pause or resume playback on KDE Plasma
+    pub fn set_paused(paused: bool) -> Result<()> {
+        let script = format!(
+            r#"var d = desktops();
+for (var i = 0; i < d.length; i++) {{
+    if (d[i].wallpaperPlugin === "{plugin}") {{
+        d[i].currentConfigGroup = ["Wallpaper", "{plugin}", "General"];
+        d[i].writeConfig("Paused", {paused});
+        d[i].reloadConfig();
+    }}
+}}"#,
+            plugin = Self::PLUGIN_ID,
+            paused = paused
+        );
+        Self::evaluate_script(&script)?;
+        debug!("KDE Plasma wallpaper paused set to {}", paused);
+        Ok(())
+    }
+
+    /// Update audio settings on KDE Plasma
+    pub fn set_audio(muted: bool, volume: u32) -> Result<()> {
+        let script = format!(
+            r#"var d = desktops();
+for (var i = 0; i < d.length; i++) {{
+    if (d[i].wallpaperPlugin === "{plugin}") {{
+        d[i].currentConfigGroup = ["Wallpaper", "{plugin}", "General"];
+        d[i].writeConfig("Muted", {muted});
+        d[i].writeConfig("Volume", {volume});
+        d[i].reloadConfig();
+    }}
+}}"#,
+            plugin = Self::PLUGIN_ID,
+            muted = muted,
+            volume = volume
+        );
+        Self::evaluate_script(&script)?;
+        debug!("KDE Plasma wallpaper audio set: muted={}, volume={}", muted, volume);
+        Ok(())
+    }
+
+    /// Update scaling mode on KDE Plasma
+    pub fn set_scaling(scaling: &str) -> Result<()> {
+        let scaling_js = serde_json::to_string(scaling)?;
+        let script = format!(
+            r#"var d = desktops();
+for (var i = 0; i < d.length; i++) {{
+    if (d[i].wallpaperPlugin === "{plugin}") {{
+        d[i].currentConfigGroup = ["Wallpaper", "{plugin}", "General"];
+        d[i].writeConfig("ScalingMode", {scaling_js});
+        d[i].reloadConfig();
+    }}
+}}"#,
+            plugin = Self::PLUGIN_ID,
+            scaling_js = scaling_js
+        );
+        Self::evaluate_script(&script)?;
+        debug!("KDE Plasma wallpaper scaling set to {}", scaling);
+        Ok(())
+    }
+
     /// Query monitors via `kscreen-doctor -j`
     pub fn get_monitors() -> Result<Vec<Monitor>> {
         let output = Command::new("kscreen-doctor")
