@@ -4,6 +4,16 @@ A high-performance, native Linux layer written in **Rust** to run **Steam Wallpa
 
 ---
 
+## 🎬 Demo
+
+<p align="center">
+  <video src="assets/demo.mp4" controls width="100%" poster="assets/demo-preview.png"></video>
+  <br>
+  <em>▶️ <b>Interactive & Video Wallpapers on Hyprland / Wayland:</b> <a href="assets/demo.mp4">assets/demo.mp4</a></em>
+</p>
+
+---
+
 ## ✨ Features
 
 - **🦀 Pure Rust Core & Daemon**: Blazing fast, zero memory footprint, rock-solid asynchronous daemon built with Tokio and Unix Domain Sockets.
@@ -34,12 +44,19 @@ A high-performance, native Linux layer written in **Rust** to run **Steam Wallpa
   - Direct hardware-accelerated decoding (VA-API / NVDEC / Vulkan) supporting 4K, 60fps, 144fps, and 200Hz displays.
   - Gapless, instant wallpaper switching over IPC without restarting processes.
   - Full volume and mute controls.
+- **✨ Interactive & Reactive Web Wallpapers (`wengine-web-player`)**:
+  - **Strictly Zero Electron**: Built in pure native C using WebKitGTK 4.1 and `gtk-layer-shell` (28KB binary, ultra-optimized, minimal memory footprint).
+  - **Full Desktop Interactivity**: Mouse click, drag, spring velocity, and slingshot physics (e.g. Workshop item `2856406172` *Lycoris Recoil / Sakana*).
+  - **Wayland Layer Integration**: Anchored to Layer Shell `BOTTOM`, placed directly behind open windows but above static backgrounds so you can interact with desktop characters seamlessly.
+  - **Transparent Canvas & Widget Support**: Auto-detects alpha transparency modes and hides web chrome, seamlessly blending interactive characters onto your desktop.
 - **📦 Native `.pkg` Scene Archive Unpacker**:
   - Pure Rust binary parser for Wallpaper Engine `scene.pkg` archives (`PKGV0001`, `PKGV0016`, `PKGV0021`, etc.).
   - Extracts and inspects `scene.json`, particle systems, shaders, textures, and embedded audio.
-- **⚡ Unified Auto-Pause on Fullscreen**:
-  - Automatically pauses video/scene rendering when launching a game or entering fullscreen on Hyprland, Sway, etc., freeing 100% of GPU/CPU for your game!
-  - Smooth auto-resume as soon as you exit fullscreen.
+- **🌱 Configurable Power-Save & Smart Auto-Pause Modes**:
+  - **`always`**: Keep running continuously in the background.
+  - **`fullscreen`** *(default)*: Pauses when a game or app is in fullscreen mode.
+  - **`power-save`** (`covered`): Smart app detection! Auto-pauses wallpaper playback whenever application windows are above the wallpaper on the active workspace to save **100% CPU and GPU resources**. Automatically resumes as soon as you switch to an empty workspace or minimize windows!
+  - Toggle anytime via `wengine power-save on` or `wengine pause-mode power-save`.
 - **🎨 Cross-Desktop Wallpaper Synchronization**:
   - Automatically synchronizes wallpaper images/previews with:
     - **GNOME** (via `gsettings` dark and light picture URI)
@@ -86,14 +103,22 @@ wengine list --type video
 
 # Apply a wallpaper by Workshop ID or title
 wengine apply 969834539 --monitor DP-1
+wengine apply 2856406172               # Interactive Sakana / Lycoris Recoil widget!
 wengine apply "Raining in Tokyo"
 
-# Control playback
+# Control playback & volume
 wengine toggle
 wengine next
 wengine random
 wengine volume 40
 wengine mute
+
+# Power-save & pause policy customization
+wengine power-save on                  # Auto-pause when apps are above the wallpaper
+wengine power-save off                 # Return to standard fullscreen pause
+wengine pause-mode always              # Never pause (keep running in background)
+wengine pause-mode fullscreen          # Standard gaming pause
+wengine pause-mode power-save          # Max battery & GPU savings
 ```
 
 ### 4. Install Noctalia Shell Plugin (Optional)
@@ -135,16 +160,17 @@ wengine pkg extract /path/to/scene.pkg --out ./extracted/
 │                     wengine Daemon                     │
 │  - Library Discovery (Steam VDF + Workshop 431960)     │
 │  - PKG Archive Engine (PKGV0001 - PKGV0021)            │
-│  - State & Playlist Coordinator                        │
+│  - Smart Auto-Pause & Power-Save Policy Manager        │
 │  - Universal Wayland Display Discovery (wl_output)     │
 └──────┬───────────────────┬──────────────────────┬──────┘
        │                   │                      │
 ┌──────▼────────────┐┌─────▼──────────────┐┌──────▼─────────────┐
 │ Compositor Bridge ││    Render Host     ││ Desktop Sync Engine│
-│ - Hyprland socket2││(wengine-layer-     ││ - GNOME (gsettings)│
-│ - Sway IPC        ││ player: wlr-layer- ││ - KDE Plasma (DBus)│
-│ - Generic Wayland ││ shell + xdg-shell) ││ - Noctalia Plugin  │
-│ (Auto-Pause Loop) ││                    ││ - Sway / swww      │
+│ - Hyprland socket2││- Video Player (mpv ││ - GNOME (gsettings)│
+│ - Sway IPC        ││  wlr-layer-shell)  ││ - KDE Plasma (DBus)│
+│ - Workspace & App ││- Web Player (native││ - Noctalia Plugin  │
+│   Layer Detection ││  WebKitGTK, zero   ││ - Sway / swww      │
+│ (Power-Save Loop) ││  Electron, 28KB)   ││                    │
 └───────────────────┘└────────────────────┘└────────────────────┘
 ```
 

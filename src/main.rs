@@ -25,12 +25,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon => {
+        Commands::Daemon { power_save, pause_mode } => {
             tracing_subscriber::fmt()
                 .with_env_filter("wengine=info")
                 .init();
-            println!("🚀 Starting Wallpaper Engine Linux daemon...");
-            Daemon::run().await?;
+            let mode = if power_save {
+                ipc::PauseMode::PowerSave
+            } else if let Some(pm) = pause_mode {
+                pm.into()
+            } else {
+                ipc::PauseMode::Fullscreen
+            };
+            println!("🚀 Starting Wallpaper Engine Linux daemon (Pause Mode: {:?})...", mode);
+            Daemon::run(mode).await?;
         }
         Commands::List {
             json,
@@ -124,6 +131,44 @@ async fn main() -> Result<()> {
                 _ => eprintln!("⚠️  wengine daemon is not running."),
             }
         }
+        Commands::PauseMode { mode } => {
+            let pm: ipc::PauseMode = mode.into();
+            match IpcClient::send(IpcRequest::SetPauseMode { mode: pm }).await {
+                Ok(IpcResponse::Ok { .. }) => {
+                    println!("⚡ Wallpaper pause mode set to: \x1b[1;32m{:?}\x1b[0m", pm);
+                }
+                _ => eprintln!("⚠️  wengine daemon is not running."),
+            }
+        }
+        Commands::PowerSave { state } => {
+            let en = match state.as_deref().map(|s| s.to_lowercase()).as_deref() {
+                Some("on" | "true" | "1" | "yes" | "enable") => true,
+                Some("off" | "false" | "0" | "no" | "disable") => false,
+                Some(other) => {
+                    eprintln!("Invalid state '{}': use 'on', 'off', 'true', or 'false'", other);
+                    return Ok(());
+                }
+                None => {
+                    // Query current status to toggle
+                    if let Ok(IpcResponse::Ok { data }) = IpcClient::send(IpcRequest::Status).await {
+                        let cur = data.get("power_save").and_then(|v| v.as_bool()).unwrap_or(false);
+                        !cur
+                    } else {
+                        true
+                    }
+                }
+            };
+            match IpcClient::send(IpcRequest::PowerSave { enabled: en }).await {
+                Ok(IpcResponse::Ok { data }) => {
+                    let ps = data.get("power_save").and_then(|v| v.as_bool()).unwrap_or(en);
+                    println!(
+                        "🌱 Power-save mode is now \x1b[1;32m{}\x1b[0m (auto-pauses when apps are above wallpaper)",
+                        if ps { "ENABLED" } else { "DISABLED" }
+                    );
+                }
+                _ => eprintln!("⚠️  wengine daemon is not running."),
+            }
+        }
         Commands::Status { json } => {
             match IpcClient::send(IpcRequest::Status).await {
                 Ok(IpcResponse::Ok { data }) => {
@@ -132,6 +177,10 @@ async fn main() -> Result<()> {
                     } else {
                         println!("📊 \x1b[1mWallpaper Engine Status\x1b[0m");
                         let paused = data.get("paused").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let auto_paused = data.get("auto_paused").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let pause_mode = data.get("pause_mode").and_then(|v| v.as_str()).unwrap_or("fullscreen");
+                        let power_save = data.get("power_save").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let apps_above = data.get("apps_above").and_then(|v| v.as_bool()).unwrap_or(false);
                         let volume = data.get("volume").and_then(|v| v.as_u64()).unwrap_or(0);
                         let muted = data.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
                         let total = data.get("total_wallpapers").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -140,11 +189,17 @@ async fn main() -> Result<()> {
                         let de = data.get("desktop_environment").and_then(|v| v.as_str()).unwrap_or("Wayland");
                         let layer_shell = data.get("supports_layer_shell").and_then(|v| v.as_bool()).unwrap_or(true);
 
-                        println!("   Desktop:   \x1b[34;1m{}\x1b[0m (Backend: {})", de, if layer_shell { "wlr-layer-shell" } else { "xdg-shell" });
-                        println!("   Playback:  {}", if paused { "\x1b[33mPaused\x1b[0m" } else { "\x1b[32mPlaying\x1b[0m" });
-                        println!("   Scaling:   \x1b[35;1m{}\x1b[0m (fill / fit / stretch)", scaling);
-                        println!("   Volume:    {}% (Muted: {})", volume, muted);
-                        println!("   Library:   {} wallpapers indexed", total);
+                        println!("   Desktop:    \x1b[34;1m{}\x1b[0m (Backend: {})", de, if layer_shell { "wlr-layer-shell" } else { "xdg-shell" });
+                        println!("   Playback:   {}", if paused { "\x1b[33mPaused\x1b[0m" } else { "\x1b[32mPlaying\x1b[0m" });
+                        println!("   Pause Mode: \x1b[35;1m{}\x1b[0m (Power-Save: {})", pause_mode, if power_save { "\x1b[32mON\x1b[0m" } else { "OFF" });
+                        if auto_paused {
+                            println!("   Auto-Pause: \x1b[33mTriggered (Apps currently covering/above wallpaper)\x1b[0m");
+                        } else if apps_above {
+                            println!("   Apps Above: Detected on active workspace");
+                        }
+                        println!("   Scaling:    \x1b[35;1m{}\x1b[0m (fill / fit / stretch)", scaling);
+                        println!("   Volume:     {}% (Muted: {})", volume, muted);
+                        println!("   Library:    {} wallpapers indexed", total);
 
                         if let Some(monitors) = data.get("monitors").and_then(|v| v.as_array()) {
                             println!("\n   \x1b[1mConnected Displays:\x1b[0m");

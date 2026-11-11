@@ -10,6 +10,8 @@ pub enum CompositorEvent {
     Fullscreen(bool),
     MonitorAdded(String),
     MonitorRemoved(String),
+    WorkspaceChanged(String),
+    WindowChanged,
     Other(String),
 }
 
@@ -34,6 +36,8 @@ impl CompositorEvents {
                             HyprEvent::Fullscreen(b) => CompositorEvent::Fullscreen(b),
                             HyprEvent::MonitorAdded(m) => CompositorEvent::MonitorAdded(m),
                             HyprEvent::MonitorRemoved(m) => CompositorEvent::MonitorRemoved(m),
+                            HyprEvent::Workspace(w) => CompositorEvent::WorkspaceChanged(w),
+                            HyprEvent::WindowChanged => CompositorEvent::WindowChanged,
                             HyprEvent::Other(o) => CompositorEvent::Other(o),
                             _ => continue,
                         };

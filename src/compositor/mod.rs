@@ -117,6 +117,15 @@ impl Compositor {
     pub fn sync_wallpaper(monitor: &str, image_path: &std::path::Path) {
         WallpaperSync::sync_desktop(monitor, image_path);
     }
+
+    /// Check whether any application windows are above the wallpaper or in fullscreen mode
+    pub fn check_apps_above() -> (bool, bool) {
+        let de = detect_desktop_environment();
+        match de {
+            DesktopEnvironment::Hyprland => Hyprland::check_apps_above(),
+            _ => (false, false),
+        }
+    }
 }
 
 #[cfg(test)]

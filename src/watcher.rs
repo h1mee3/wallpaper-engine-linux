@@ -101,6 +101,7 @@ impl SteamWatcher {
     pub fn start(state: Arc<Mutex<DaemonState>>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut last_acf_mtime = std::time::SystemTime::UNIX_EPOCH;
+            let mut last_config_mtimes: HashMap<PathBuf, std::time::SystemTime> = HashMap::new();
             let mut last_applied_paths: HashMap<String, PathBuf> = HashMap::new();
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(1500));
 
@@ -127,18 +128,27 @@ impl SteamWatcher {
 
                 // 2. Check for Wallpaper Engine config.json changes (selected in official UI)
                 for cfg in config_targets {
-                    if !cfg.exists() {
+                    let mtime = match fs::metadata(&cfg).and_then(|m| m.modified()) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+
+                    let is_initial = !last_config_mtimes.contains_key(&cfg);
+                    let prev_mtime = last_config_mtimes.get(&cfg).copied().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+                    if !is_initial && mtime <= prev_mtime {
+                        // File has not been modified since last check
                         continue;
                     }
+
+                    last_config_mtimes.insert(cfg.clone(), mtime);
 
                     if let Ok(content) = fs::read_to_string(&cfg) {
                         let selections = Self::parse_config_json(&content);
                         for (mon, path) in selections {
-                            // Only trigger if this selection actually changed
                             let prev = last_applied_paths.get(&mon);
                             if prev != Some(&path) {
-                                info!("Steam Wallpaper Engine selected new wallpaper for {}: {:?}", mon, path);
-                                last_applied_paths.insert(mon, path.clone());
+                                last_applied_paths.insert(mon.clone(), path.clone());
 
                                 let id_opt = path
                                     .parent()
@@ -151,7 +161,17 @@ impl SteamWatcher {
 
                                 if let Some(id) = id_opt {
                                     let mut s = state.lock().await;
-                                    let _ = s.apply_by_query(&id, None).await;
+                                    // On startup, only apply if no wallpaper is currently running
+                                    let should_apply = if is_initial {
+                                        s.render_manager.get_active_wallpapers().is_empty()
+                                    } else {
+                                        true
+                                    };
+
+                                    if should_apply {
+                                        info!("Steam Wallpaper Engine selected wallpaper for {}: {:?}", mon, path);
+                                        let _ = s.apply_by_query(&id, None).await;
+                                    }
                                 }
                             }
                         }

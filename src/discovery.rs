@@ -39,8 +39,64 @@ pub struct Wallpaper {
 }
 
 impl Wallpaper {
+    /// Check if this wallpaper is an interactive / reactive Web wallpaper
+    pub fn is_web(&self) -> bool {
+        if self.wallpaper_type == WallpaperType::Web {
+            return true;
+        }
+        if let Some(ext) = self.full_file_path.extension().and_then(|e| e.to_str()) {
+            let l = ext.to_lowercase();
+            if l == "html" || l == "htm" {
+                return true;
+            }
+        }
+        if self.file.ends_with(".html") || self.file.ends_with(".htm") {
+            return true;
+        }
+        false
+    }
+
+    /// Resolve the HTML document entrypoint for a Web wallpaper
+    pub fn resolve_web_path(&self) -> Option<PathBuf> {
+        if self.full_file_path.exists() {
+            if let Some(ext) = self.full_file_path.extension().and_then(|e| e.to_str()) {
+                let l = ext.to_lowercase();
+                if l == "html" || l == "htm" {
+                    return Some(self.full_file_path.clone());
+                }
+            }
+        }
+        let cand = self.folder_path.join(&self.file);
+        if cand.exists() {
+            return Some(cand);
+        }
+        let index = self.folder_path.join("index.html");
+        if index.exists() {
+            return Some(index);
+        }
+        // Check for any .html in the folder
+        if let Ok(entries) = std::fs::read_dir(&self.folder_path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                    if ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm") {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Resolve the best playable media asset for any wallpaper type (Video, Scene, Web)
     pub fn resolve_playable_path(&self) -> Option<PathBuf> {
+        // If it's an interactive web wallpaper, resolve its HTML path
+        if self.is_web() {
+            if let Some(web_file) = self.resolve_web_path() {
+                return Some(web_file);
+            }
+        }
+
         // If it's already a valid video file
         if self.wallpaper_type == WallpaperType::Video && self.full_file_path.exists() {
             return Some(self.full_file_path.clone());

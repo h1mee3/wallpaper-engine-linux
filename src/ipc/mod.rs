@@ -6,6 +6,23 @@ use tokio::net::UnixStream;
 
 use crate::renderer::ScalingMode;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PauseMode {
+    /// Keep running in background continuously (never auto-pause)
+    Always,
+    /// Auto-pause only when an application is fullscreen (Default)
+    Fullscreen,
+    /// Power-save: Auto-pause whenever an application window is above the wallpaper / covering active workspace
+    PowerSave,
+}
+
+impl Default for PauseMode {
+    fn default() -> Self {
+        PauseMode::Fullscreen
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum IpcRequest {
@@ -26,6 +43,12 @@ pub enum IpcRequest {
     },
     Scaling {
         mode: ScalingMode,
+    },
+    SetPauseMode {
+        mode: PauseMode,
+    },
+    PowerSave {
+        enabled: bool,
     },
     Next {
         monitor: Option<String>,
