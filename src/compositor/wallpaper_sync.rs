@@ -31,7 +31,7 @@ impl WallpaperSync {
             DesktopEnvironment::KdePlasma => {
                 // KDE Plasma allows setting wallpaper via dbus evaluateScript
                 let script = format!(
-                    r#"for (let d of desktops()) {{ d.wallpaperPlugin = "org.kde.image"; d.currentConfigGroup = Array("Wallpaper", "org.kde.image", "General"); d.writeConfig("Image", "file://{}"); }}"#,
+                    r#"var d = desktops(); for (var i = 0; i < d.length; i++) {{ d[i].wallpaperPlugin = "org.kde.image"; d[i].currentConfigGroup = ["Wallpaper", "org.kde.image", "General"]; d[i].writeConfig("Image", "file://{}"); d[i].reloadConfig(); }}"#,
                     path_str
                 );
                 let _ = Command::new("qdbus")

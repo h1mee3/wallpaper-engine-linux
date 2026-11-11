@@ -1,6 +1,7 @@
 pub mod detection;
 pub mod drm;
 pub mod events;
+pub mod kde;
 pub mod monitor;
 pub mod sway;
 pub mod wallpaper_sync;
@@ -11,6 +12,7 @@ use tracing::{debug, info, warn};
 
 pub use detection::{detect_desktop_environment, DesktopEnvironment};
 pub use events::{CompositorEvent, CompositorEvents};
+pub use kde::Kde;
 pub use monitor::Monitor;
 pub use wallpaper_sync::WallpaperSync;
 
@@ -57,7 +59,21 @@ impl Compositor {
                     }
                 }
             }
+            DesktopEnvironment::KdePlasma => {
+                if let Ok(mons) = Kde::get_monitors() {
+                    if !mons.is_empty() {
+                        return Ok(mons);
+                    }
+                }
+            }
             _ => {}
+        }
+
+        // Try kscreen-doctor anyway if available
+        if let Ok(mons) = Kde::get_monitors() {
+            if !mons.is_empty() {
+                return Ok(mons);
+            }
         }
 
         // Try swaymsg anyway if available

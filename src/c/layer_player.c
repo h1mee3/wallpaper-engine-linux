@@ -384,6 +384,15 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
+
+        // If specific target was not matched and only 1 output is connected, fallback to it
+        if (!chosen_output && app.outputs && !app.outputs->next) {
+            chosen_output = app.outputs->output;
+            if (app.outputs->width > 0 && app.outputs->height > 0) {
+                app.width = app.outputs->width;
+                app.height = app.outputs->height;
+            }
+        }
     }
 
     app.output = chosen_output;
