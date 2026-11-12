@@ -26,6 +26,7 @@ WallpaperItem {
     MediaPlayer {
         id: player
         audioOutput: audioOutput
+        videoOutput: videoOutput
         loops: MediaPlayer.Infinite
         source: {
             if (!root.videoPath) return "";

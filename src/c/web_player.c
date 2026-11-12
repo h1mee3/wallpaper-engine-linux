@@ -219,6 +219,8 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
 
+    // Prefer native Wayland backend across all Wayland DEs/WMs
+    gdk_set_allowed_backends("wayland,x11");
     gtk_init(&argc, &argv);
 
     // Auto-detect Sakana widget and ensure transparent alpha parameter is supplied
@@ -252,37 +254,21 @@ int main(int argc, char *argv[]) {
     }
 
     main_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_layer_init_for_window(GTK_WINDOW(main_window));
+    gtk_window_set_title(GTK_WINDOW(main_window), "wengine-wallpaper");
+    gtk_window_set_decorated(GTK_WINDOW(main_window), FALSE);
 
-    // Configure Layer: Default BOTTOM for interactive wallpapers so they receive mouse clicks behind windows
-    GtkLayerShellLayer layer = GTK_LAYER_SHELL_LAYER_BOTTOM;
-    if (layer_str && strcasecmp(layer_str, "background") == 0) {
-        layer = GTK_LAYER_SHELL_LAYER_BACKGROUND;
-    }
-    gtk_layer_set_layer(GTK_WINDOW(main_window), layer);
-    gtk_layer_set_namespace(GTK_WINDOW(main_window), "wengine-wallpaper");
+    // Resolve target monitor if requested (match connector e.g. DP-1, plug name, model, or index)
+    GdkDisplay *display = gdk_display_get_default();
+    GdkScreen *screen = gdk_screen_get_default();
+    GdkMonitor *target_mon = NULL;
+    int target_mon_idx = -1;
 
-    // Anchor to all 4 edges to span display
-    gtk_layer_set_anchor(GTK_WINDOW(main_window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
-    gtk_layer_set_anchor(GTK_WINDOW(main_window), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
-    gtk_layer_set_anchor(GTK_WINDOW(main_window), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
-    gtk_layer_set_anchor(GTK_WINDOW(main_window), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
-
-    // Exclusive zone -1: true desktop layer, never reserve window panel space
-    gtk_layer_set_exclusive_zone(GTK_WINDOW(main_window), -1);
-
-    // Keyboard mode none: do not steal keyboard focus from workspace windows
-    gtk_layer_set_keyboard_mode(GTK_WINDOW(main_window), GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
-
-    // Target specific monitor if requested (match plug name e.g. DP-1, or model, or index)
-    if (monitor_name && strlen(monitor_name) > 0 && strcmp(monitor_name, "*") != 0) {
-        GdkDisplay *display = gdk_display_get_default();
-        GdkScreen *screen = gdk_screen_get_default();
+    if (monitor_name && strlen(monitor_name) > 0 && strcmp(monitor_name, "*") != 0 && display) {
         int n_monitors = gdk_display_get_n_monitors(display);
         for (int i = 0; i < n_monitors; i++) {
             GdkMonitor *mon = gdk_display_get_monitor(display, i);
             const char *model = gdk_monitor_get_model(mon);
-            char *plug = gdk_screen_get_monitor_plug_name(screen, i);
+            char *plug = screen ? gdk_screen_get_monitor_plug_name(screen, i) : NULL;
             char *endptr = NULL;
             long idx = strtol(monitor_name, &endptr, 10);
             bool matched = false;
@@ -298,9 +284,51 @@ int main(int argc, char *argv[]) {
             if (plug) g_free(plug);
 
             if (matched) {
-                gtk_layer_set_monitor(GTK_WINDOW(main_window), mon);
+                target_mon = mon;
+                target_mon_idx = i;
                 break;
             }
+        }
+    }
+
+    gboolean layer_supported = gtk_layer_is_supported();
+    GtkLayerShellLayer layer = GTK_LAYER_SHELL_LAYER_BOTTOM;
+    if (layer_str && strcasecmp(layer_str, "background") == 0) {
+        layer = GTK_LAYER_SHELL_LAYER_BACKGROUND;
+    }
+
+    if (layer_supported) {
+        gtk_layer_init_for_window(GTK_WINDOW(main_window));
+
+        // Configure Layer: Default BOTTOM for interactive wallpapers so they receive mouse clicks behind windows
+        gtk_layer_set_layer(GTK_WINDOW(main_window), layer);
+        gtk_layer_set_namespace(GTK_WINDOW(main_window), "wengine-wallpaper");
+
+        // Anchor to all 4 edges to span display
+        gtk_layer_set_anchor(GTK_WINDOW(main_window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+        gtk_layer_set_anchor(GTK_WINDOW(main_window), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
+        gtk_layer_set_anchor(GTK_WINDOW(main_window), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+        gtk_layer_set_anchor(GTK_WINDOW(main_window), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
+
+        // Exclusive zone -1: true desktop layer, never reserve window panel space
+        gtk_layer_set_exclusive_zone(GTK_WINDOW(main_window), -1);
+
+        // Keyboard mode none: do not steal keyboard focus from workspace windows
+        gtk_layer_set_keyboard_mode(GTK_WINDOW(main_window), GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+
+        if (target_mon) {
+            gtk_layer_set_monitor(GTK_WINDOW(main_window), target_mon);
+        }
+    } else {
+        // Fallback for Wayland compositors without zwlr_layer_shell_v1 (e.g. GNOME / Mutter)
+        fprintf(stderr, "wengine-web-player: gtk-layer-shell unsupported on this compositor, using fullscreen fallback\n");
+        gtk_window_set_skip_taskbar_hint(GTK_WINDOW(main_window), TRUE);
+        gtk_window_set_skip_pager_hint(GTK_WINDOW(main_window), TRUE);
+        gtk_window_set_keep_below(GTK_WINDOW(main_window), TRUE);
+        if (screen && target_mon_idx >= 0) {
+            gtk_window_fullscreen_on_monitor(GTK_WINDOW(main_window), screen, target_mon_idx);
+        } else {
+            gtk_window_fullscreen(GTK_WINDOW(main_window));
         }
     }
 
@@ -410,7 +438,7 @@ int main(int argc, char *argv[]) {
     }
 
     fprintf(stderr, "wengine-web-player: Loading interactive wallpaper '%s' on layer %s\n",
-            full_url, (layer == GTK_LAYER_SHELL_LAYER_BOTTOM) ? "BOTTOM" : "BACKGROUND");
+            full_url, !layer_supported ? "FALLBACK" : ((layer == GTK_LAYER_SHELL_LAYER_BOTTOM) ? "BOTTOM" : "BACKGROUND"));
     webkit_web_view_load_uri(WEBKIT_WEB_VIEW(web_view), full_url);
 
     gtk_widget_show_all(main_window);

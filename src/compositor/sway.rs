@@ -68,6 +68,69 @@ impl Sway {
         Ok(monitors)
     }
 
+    /// Check whether any visible window is fullscreen or covering the desktop on Sway
+    pub fn check_apps_above() -> (bool, bool) {
+        let output = match Command::new("swaymsg")
+            .args(["-t", "get_tree", "--raw"])
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return (false, false),
+        };
+
+        let root: Value = match serde_json::from_slice(&output.stdout) {
+            Ok(v) => v,
+            Err(_) => return (false, false),
+        };
+
+        let mut has_fullscreen = false;
+        let mut has_apps_above = false;
+
+        fn walk_workspace(node: &Value, has_fullscreen: &mut bool, has_apps_above: &mut bool) {
+            let node_type = node["type"].as_str().unwrap_or_default();
+            if (node_type == "con" || node_type == "floating_con") && node.get("pid").is_some() {
+                let app_id = node["app_id"].as_str().unwrap_or_default();
+                let visible = node["visible"].as_bool().unwrap_or(true);
+                if app_id != "wengine-wallpaper" && visible {
+                    *has_apps_above = true;
+                    if node["fullscreen_mode"].as_u64().unwrap_or(0) > 0 {
+                        *has_fullscreen = true;
+                    }
+                }
+            }
+            if let Some(nodes) = node["nodes"].as_array() {
+                for child in nodes {
+                    walk_workspace(child, has_fullscreen, has_apps_above);
+                }
+            }
+            if let Some(floating) = node["floating_nodes"].as_array() {
+                for child in floating {
+                    walk_workspace(child, has_fullscreen, has_apps_above);
+                }
+            }
+        }
+
+        fn find_workspaces(node: &Value, has_fullscreen: &mut bool, has_apps_above: &mut bool) {
+            if node["type"].as_str() == Some("workspace") {
+                // Only inspect visible workspaces (current workspace on each output)
+                if node["visible"].as_bool().unwrap_or(false)
+                    || node["focused"].as_bool().unwrap_or(false)
+                {
+                    walk_workspace(node, has_fullscreen, has_apps_above);
+                }
+                return;
+            }
+            if let Some(nodes) = node["nodes"].as_array() {
+                for child in nodes {
+                    find_workspaces(child, has_fullscreen, has_apps_above);
+                }
+            }
+        }
+
+        find_workspaces(&root, &mut has_fullscreen, &mut has_apps_above);
+        (has_fullscreen, has_apps_above)
+    }
+
     /// Start listening to Sway IPC events (fullscreen, outputs)
     pub fn start_event_listener(tx: mpsc::UnboundedSender<CompositorEvent>) -> Option<tokio::task::JoinHandle<()>> {
         let socket_path = Self::socket_path()?;

@@ -136,12 +136,24 @@ impl Compositor {
         WallpaperSync::sync_desktop(monitor, image_path);
     }
 
+    /// Ensure Wayland display environment variables are populated
+    pub fn ensure_wayland_env() -> bool {
+        detection::ensure_wayland_env()
+    }
+
+    /// Wait for Wayland display socket at session startup (e.g. SDDM/GDM/systemd login)
+    pub async fn wait_for_wayland_env() -> bool {
+        detection::wait_for_wayland_env().await
+    }
+
     /// Check whether any application windows are above the wallpaper or in fullscreen mode
     pub fn check_apps_above() -> (bool, bool) {
         let de = detect_desktop_environment();
         match de {
             DesktopEnvironment::Hyprland => Hyprland::check_apps_above(),
-            _ => (false, false),
+            DesktopEnvironment::Sway => sway::Sway::check_apps_above(),
+            DesktopEnvironment::KdePlasma => Kde::check_apps_above(),
+            _ => wayland::query_foreign_toplevels().unwrap_or((false, false)),
         }
     }
 }
