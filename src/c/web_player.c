@@ -304,8 +304,12 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Create WebKit Web View
-    web_view = webkit_web_view_new();
+    // Create WebKit Web View with unrestricted media autoplay policy
+    WebKitWebsitePolicies *policies = webkit_website_policies_new_with_policies(
+        "autoplay", WEBKIT_AUTOPLAY_ALLOW,
+        NULL
+    );
+    web_view = g_object_new(WEBKIT_TYPE_WEB_VIEW, "website-policies", policies, NULL);
 
     // Enable transparent background so wallpaper blends seamlessly
     GdkRGBA transparent = {0.0, 0.0, 0.0, 0.0};
@@ -324,13 +328,50 @@ int main(int argc, char *argv[]) {
     // Inject Wallpaper Engine API Compatibility Shim & auto alpha transparency
     WebKitUserContentManager *cm = webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(web_view));
     const char *we_shim = 
-        "window.wallpaperPropertyListener = window.wallpaperPropertyListener || {};\n"
-        "window.wallpaperRegisterAudioListener = window.wallpaperRegisterAudioListener || function(){};\n"
-        "document.addEventListener('DOMContentLoaded', function() {\n"
-        "  if (document.documentElement && !document.documentElement.getAttribute('data-alpha')) {\n"
-        "    document.documentElement.setAttribute('data-alpha', 'true');\n"
+        "(function() {\n"
+        "  var _userProps = {};\n"
+        "  try {\n"
+        "    var xhr = new XMLHttpRequest();\n"
+        "    xhr.open('GET', 'project.json', false);\n"
+        "    xhr.send();\n"
+        "    if (xhr.status === 200 || xhr.status === 0) {\n"
+        "      var data = JSON.parse(xhr.responseText);\n"
+        "      if (data && data.general && data.general.properties) {\n"
+        "        _userProps = data.general.properties;\n"
+        "      }\n"
+        "    }\n"
+        "  } catch (e) {}\n"
+        "  var _wpl = {};\n"
+        "  function notifyListener(l) {\n"
+        "    if (!l) return;\n"
+        "    try {\n"
+        "      if (typeof l.applyGeneralProperties === 'function') l.applyGeneralProperties({ fps: 60 });\n"
+        "      if (typeof l.applyUserProperties === 'function') l.applyUserProperties(_userProps);\n"
+        "      if (typeof l.setPaused === 'function') l.setPaused(false);\n"
+        "    } catch (err) {}\n"
         "  }\n"
-        "});\n";
+        "  Object.defineProperty(window, 'wallpaperPropertyListener', {\n"
+        "    get: function() { return _wpl; },\n"
+        "    set: function(val) {\n"
+        "      _wpl = val;\n"
+        "      setTimeout(function() { notifyListener(_wpl); }, 20);\n"
+        "    },\n"
+        "    configurable: true,\n"
+        "    enumerable: true\n"
+        "  });\n"
+        "  window.wallpaperRegisterAudioListener = window.wallpaperRegisterAudioListener || function(cb) {};\n"
+        "  window.wallpaperRegisterMediaListener = window.wallpaperRegisterMediaListener || function(cb) {};\n"
+        "  window.wallpaperRequestRandomFileForProperty = window.wallpaperRequestRandomFileForProperty || function(p, cb) {};\n"
+        "  document.addEventListener('DOMContentLoaded', function() {\n"
+        "    if (document.documentElement && !document.documentElement.getAttribute('data-alpha')) {\n"
+        "      document.documentElement.setAttribute('data-alpha', 'true');\n"
+        "    }\n"
+        "    if (window.wallpaperPropertyListener) notifyListener(window.wallpaperPropertyListener);\n"
+        "  });\n"
+        "  window.addEventListener('load', function() {\n"
+        "    if (window.wallpaperPropertyListener) notifyListener(window.wallpaperPropertyListener);\n"
+        "  });\n"
+        "})();\n";
     WebKitUserScript *script = webkit_user_script_new(
         we_shim,
         WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
@@ -341,6 +382,14 @@ int main(int argc, char *argv[]) {
     webkit_user_script_unref(script);
 
     // Enable full pointer and gesture events for interactive/reactive physics
+    gtk_widget_add_events(main_window,
+        GDK_BUTTON_PRESS_MASK |
+        GDK_BUTTON_RELEASE_MASK |
+        GDK_POINTER_MOTION_MASK |
+        GDK_SCROLL_MASK |
+        GDK_SMOOTH_SCROLL_MASK |
+        GDK_TOUCH_MASK
+    );
     gtk_widget_add_events(web_view,
         GDK_BUTTON_PRESS_MASK |
         GDK_BUTTON_RELEASE_MASK |
