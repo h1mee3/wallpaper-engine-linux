@@ -13,6 +13,7 @@ pub enum HyprEvent {
     Fullscreen(bool),
     FocusedMon(String),
     Workspace(String),
+    WindowChanged,
     MonitorAdded(String),
     MonitorRemoved(String),
     Other(String),
@@ -99,6 +100,9 @@ impl Hyprland {
                     HyprEvent::FocusedMon(mon)
                 }
                 "workspace" => HyprEvent::Workspace(arg.to_string()),
+                "openwindow" | "closewindow" | "movewindow" | "activewindow" => {
+                    HyprEvent::WindowChanged
+                }
                 "monitoradded" => HyprEvent::MonitorAdded(arg.to_string()),
                 "monitorremoved" => HyprEvent::MonitorRemoved(arg.to_string()),
                 other => HyprEvent::Other(format!("{}>>{}", other, arg)),
@@ -106,6 +110,56 @@ impl Hyprland {
         } else {
             HyprEvent::Other(line.to_string())
         }
+    }
+
+    /// Check if there are any windows or fullscreen apps on the active workspace or covering layers
+    pub fn check_apps_above() -> (bool, bool) {
+        let mut has_fullscreen = false;
+        let mut has_apps = false;
+
+        // 1. Check active workspace for windows & fullscreen flag
+        if let Ok(output) = Command::new("hyprctl").args(["activeworkspace", "-j"]).output() {
+            if output.status.success() {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    if let Some(w) = val.get("windows").and_then(|v| v.as_u64()) {
+                        if w > 0 {
+                            has_apps = true;
+                        }
+                    }
+                    if let Some(f) = val.get("hasfullscreen").and_then(|v| v.as_bool()) {
+                        if f {
+                            has_fullscreen = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Check surface layers for overlay (layer 3) covering the screen
+        if let Ok(output) = Command::new("hyprctl").args(["layers", "-j"]).output() {
+            if output.status.success() {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    if let Some(obj) = val.as_object() {
+                        for (_mon, data) in obj {
+                            if let Some(levels) = data.get("levels").and_then(|l| l.as_object()) {
+                                if let Some(overlay) = levels.get("3").and_then(|v| v.as_array()) {
+                                    for surface in overlay {
+                                        let w = surface.get("w").and_then(|v| v.as_u64()).unwrap_or(0);
+                                        let h = surface.get("h").and_then(|v| v.as_u64()).unwrap_or(0);
+                                        if w >= 1280 && h >= 720 {
+                                            has_fullscreen = true;
+                                            has_apps = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (has_fullscreen, has_apps)
     }
 
     /// Setup any necessary layer rules for wengine-wallpaper

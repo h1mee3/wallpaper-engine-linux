@@ -418,10 +418,12 @@ int main(int argc, char *argv[]) {
     // Create wayland surface
     app.surface = wl_compositor_create_surface(app.compositor);
 
-    // Set empty input region so mouse clicks, drags, and desktop interactions pass completely through
+    // Video wallpaper: pass through all mouse clicks to desktop / widgets
     struct wl_region *empty_region = wl_compositor_create_region(app.compositor);
-    wl_surface_set_input_region(app.surface, empty_region);
-    wl_region_destroy(empty_region);
+    if (empty_region) {
+        wl_surface_set_input_region(app.surface, empty_region);
+        wl_region_destroy(empty_region);
+    }
 
     if (app.layer_shell) {
         app.is_xdg_mode = false;
