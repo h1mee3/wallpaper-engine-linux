@@ -35,10 +35,40 @@ impl From<CliScalingMode> for ScalingMode {
     }
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CliPauseMode {
+    /// Keep running in background continuously (never auto-pause)
+    Always,
+    /// Pause only when an application is fullscreen (Default)
+    Fullscreen,
+    /// Pause whenever an application window is above the wallpaper / covering active workspace
+    Covered,
+    /// Synonym for Covered: maximum power saving, only run when desktop is visible
+    PowerSave,
+}
+
+impl From<CliPauseMode> for crate::ipc::PauseMode {
+    fn from(c: CliPauseMode) -> Self {
+        match c {
+            CliPauseMode::Always => crate::ipc::PauseMode::Always,
+            CliPauseMode::Fullscreen => crate::ipc::PauseMode::Fullscreen,
+            CliPauseMode::Covered | CliPauseMode::PowerSave => crate::ipc::PauseMode::PowerSave,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Start the background daemon
-    Daemon,
+    Daemon {
+        /// Enable power-save mode (auto-pauses wallpaper whenever an app is above the wallpaper)
+        #[arg(long)]
+        power_save: bool,
+
+        /// Pause policy mode: always, fullscreen, covered, power-save
+        #[arg(long)]
+        pause_mode: Option<CliPauseMode>,
+    },
 
     /// List all discovered Wallpaper Engine wallpapers
     List {
@@ -76,6 +106,19 @@ pub enum Commands {
     Scale {
         /// Scaling mode: fill (crop to fill display, no black bars), fit, stretch
         mode: CliScalingMode,
+    },
+
+    /// Set auto-pause and power-saving policy mode (always, fullscreen, power-save)
+    PauseMode {
+        /// Policy mode: always (keep running), fullscreen (pause on fullscreen), power-save (pause when covered by apps)
+        mode: CliPauseMode,
+    },
+
+    /// Toggle or set power-save mode (pauses wallpaper when apps are above it)
+    PowerSave {
+        /// Enable or disable power-save mode (on/off, true/false, 1/0)
+        #[arg(value_name = "on/off")]
+        state: Option<String>,
     },
 
     /// Toggle wallpaper pause/playback

@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use crate::compositor::{Compositor, CompositorEvent, Monitor};
 use crate::discovery::{Discovery, Wallpaper};
-use crate::ipc::{get_socket_path, IpcRequest, IpcResponse};
+use crate::ipc::{get_socket_path, IpcRequest, IpcResponse, PauseMode};
 use crate::renderer::RenderManager;
 use crate::watcher::SteamWatcher;
 
@@ -35,10 +35,12 @@ pub struct DaemonState {
     pub render_manager: RenderManager,
     pub monitors: Vec<Monitor>,
     pub current_indices: HashMap<String, usize>,
+    pub pause_mode: PauseMode,
+    pub auto_paused: bool,
 }
 
 impl DaemonState {
-    pub fn new() -> Self {
+    pub fn new(pause_mode: PauseMode) -> Self {
         let wallpapers = Discovery::discover_all(&[]);
         let monitors = Compositor::get_monitors().unwrap_or_else(|e| {
             warn!("Could not fetch displays: {}", e);
@@ -50,6 +52,8 @@ impl DaemonState {
             render_manager: RenderManager::new(),
             monitors,
             current_indices: HashMap::new(),
+            pause_mode,
+            auto_paused: false,
         }
     }
 
@@ -233,7 +237,9 @@ impl DaemonState {
                 .await?;
         }
 
-        self.save_state();
+        // Check if new wallpaper should be auto-paused according to current pause mode
+        let _ = self.evaluate_auto_pause().await;
+
         Ok(wp)
     }
 
@@ -256,7 +262,7 @@ impl DaemonState {
         self.render_manager
             .apply_wallpaper(monitor, &wp, w, h, x, y)
             .await?;
-        self.save_state();
+        let _ = self.evaluate_auto_pause().await;
         Ok(Some(wp))
     }
 
@@ -277,27 +283,75 @@ impl DaemonState {
         self.render_manager
             .apply_wallpaper(monitor, &wp, w, h, x, y)
             .await?;
-        self.save_state();
+        let _ = self.evaluate_auto_pause().await;
         Ok(Some(wp))
+    }
+
+    /// Evaluate auto-pause and power-save conditions based on window layers and active workspace
+    pub async fn evaluate_auto_pause(&mut self) -> Result<()> {
+        let (has_fullscreen, has_apps_above) = Compositor::check_apps_above();
+
+        debug!(
+            "Evaluating auto-pause (mode: {:?}, fullscreen: {}, apps_above: {})",
+            self.pause_mode, has_fullscreen, has_apps_above
+        );
+
+        match self.pause_mode {
+            PauseMode::Always => {
+                // User wants wallpaper running in background continuously, never auto-pause
+                if self.auto_paused {
+                    self.auto_paused = false;
+                    self.render_manager.resume_all().await?;
+                }
+            }
+            PauseMode::Fullscreen => {
+                if has_fullscreen {
+                    if !self.auto_paused {
+                        info!("Fullscreen app active: auto-pausing wallpaper");
+                        self.auto_paused = true;
+                        self.render_manager.pause_all().await?;
+                    }
+                } else if self.auto_paused {
+                    info!("Fullscreen app exited: auto-resuming wallpaper");
+                    self.auto_paused = false;
+                    self.render_manager.resume_all().await?;
+                }
+            }
+            PauseMode::PowerSave => {
+                let should_pause = has_fullscreen || has_apps_above;
+                if should_pause {
+                    if !self.auto_paused {
+                        info!("Power-save active (app above wallpaper): pausing wallpaper to save 100% resources");
+                        self.auto_paused = true;
+                        self.render_manager.pause_all().await?;
+                    }
+                } else if self.auto_paused {
+                    info!("Desktop visible (no apps above wallpaper): resuming wallpaper");
+                    self.auto_paused = false;
+                    self.render_manager.resume_all().await?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 pub struct Daemon;
 
 impl Daemon {
-    pub async fn run() -> Result<()> {
+    pub async fn run(initial_pause_mode: PauseMode) -> Result<()> {
         let socket_path = get_socket_path();
         if socket_path.exists() {
             let _ = std::fs::remove_file(&socket_path);
         }
 
-        info!("Starting wengine daemon on {:?}", socket_path);
+        info!("Starting wengine daemon on {:?} (pause_mode: {:?})", socket_path, initial_pause_mode);
         let listener = UnixListener::bind(&socket_path)?;
 
         // Setup compositor window/layer rules
         Compositor::setup_compositor_rules();
 
-        let state = Arc::new(Mutex::new(DaemonState::new()));
+        let state = Arc::new(Mutex::new(DaemonState::new(initial_pause_mode)));
 
         // Restore saved wallpaper state immediately on startup/restart
         {
@@ -309,7 +363,7 @@ impl Daemon {
         let state_watcher = Arc::clone(&state);
         let _watcher_handle = SteamWatcher::start(state_watcher);
 
-        // Start unified compositor event listener (auto-pause on fullscreen, monitor hotplug)
+        // Start unified compositor event listener (auto-pause on fullscreen, monitor hotplug, workspace change)
         let (comp_tx, mut comp_rx) = mpsc::unbounded_channel();
         let _comp_handle = Compositor::start_event_listener(comp_tx);
 
@@ -318,15 +372,11 @@ impl Daemon {
         tokio::spawn(async move {
             while let Some(event) = comp_rx.recv().await {
                 match event {
-                    CompositorEvent::Fullscreen(is_full) => {
+                    CompositorEvent::Fullscreen(_)
+                    | CompositorEvent::WorkspaceChanged(_)
+                    | CompositorEvent::WindowChanged => {
                         let mut s = state_comp.lock().await;
-                        if is_full {
-                            info!("Fullscreen active: pausing wallpapers");
-                            let _ = s.render_manager.pause_all().await;
-                        } else {
-                            info!("Fullscreen exited: resuming wallpapers");
-                            let _ = s.render_manager.resume_all().await;
-                        }
+                        let _ = s.evaluate_auto_pause().await;
                     }
                     CompositorEvent::MonitorAdded(name) => {
                         info!("Monitor connected: {}", name);
@@ -350,9 +400,11 @@ impl Daemon {
 
         info!("wengine daemon initialized and waiting for connections");
 
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+        // Initial auto-pause evaluation
+        {
+            let mut s = state.lock().await;
+            let _ = s.evaluate_auto_pause().await;
+        }
 
         // IPC Server Loop
         loop {
@@ -460,8 +512,14 @@ impl Daemon {
             }
             IpcRequest::Status => {
                 let active = s.render_manager.get_active_wallpapers();
+                let (has_fullscreen, has_apps) = Compositor::check_apps_above();
                 let status_data = json!({
                     "paused": s.render_manager.is_paused(),
+                    "auto_paused": s.auto_paused,
+                    "pause_mode": s.pause_mode,
+                    "power_save": s.pause_mode == PauseMode::PowerSave,
+                    "apps_above": has_apps,
+                    "has_fullscreen": has_fullscreen,
                     "volume": s.render_manager.volume(),
                     "muted": s.render_manager.is_muted(),
                     "scaling_mode": s.render_manager.scaling_mode(),
@@ -493,6 +551,30 @@ impl Daemon {
                     message: e.to_string(),
                 },
             },
+            IpcRequest::SetPauseMode { mode } => {
+                s.pause_mode = mode;
+                let _ = s.evaluate_auto_pause().await;
+                IpcResponse::Ok {
+                    data: json!({
+                        "pause_mode": s.pause_mode,
+                        "power_save": s.pause_mode == PauseMode::PowerSave
+                    }),
+                }
+            }
+            IpcRequest::PowerSave { enabled } => {
+                s.pause_mode = if enabled {
+                    PauseMode::PowerSave
+                } else {
+                    PauseMode::Fullscreen
+                };
+                let _ = s.evaluate_auto_pause().await;
+                IpcResponse::Ok {
+                    data: json!({
+                        "power_save": enabled,
+                        "pause_mode": s.pause_mode
+                    }),
+                }
+            }
             IpcRequest::Volume { value } => {
                 let _ = s.render_manager.set_volume(value).await;
                 s.save_state();
