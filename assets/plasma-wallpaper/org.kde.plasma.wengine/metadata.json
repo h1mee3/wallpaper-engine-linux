@@ -1,0 +1,15 @@
+{
+    "KPackageStructure": "Plasma/Wallpaper",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Wallpaper Engine Linux (wengine)"
+            }
+        ],
+        "Id": "org.kde.plasma.wengine",
+        "Name": "Wallpaper Engine Linux",
+        "Description": "Hardware-accelerated native video and live wallpaper renderer for KDE Plasma",
+        "Icon": "preferences-desktop-wallpaper"
+    },
+    "X-KDE-ParentApp": "org.kde.plasmashell"
+}

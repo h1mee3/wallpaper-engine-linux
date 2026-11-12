@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <poll.h>
 #include <signal.h>
+#include <errno.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
 #include <EGL/egl.h>
@@ -311,8 +312,14 @@ int main(int argc, char *argv[]) {
     const char *output_name = argc > 2 ? argv[2] : "";
     const char *ipc_socket = argc > 3 ? argv[3] : NULL;
 
-    signal(SIGINT, sig_handler);
-    signal(SIGTERM, sig_handler);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
 
     struct app_state app = {0};
     app.width = 1920;
@@ -382,6 +389,15 @@ int main(int argc, char *argv[]) {
                     i++;
                     cur = cur->next;
                 }
+            }
+        }
+
+        // If specific target was not matched and only 1 output is connected, fallback to it
+        if (!chosen_output && app.outputs && !app.outputs->next) {
+            chosen_output = app.outputs->output;
+            if (app.outputs->width > 0 && app.outputs->height > 0) {
+                app.width = app.outputs->width;
+                app.height = app.outputs->height;
             }
         }
     }
@@ -456,6 +472,10 @@ int main(int argc, char *argv[]) {
         if (wl_display_dispatch(app.display) == -1) break;
     }
 
+    if (!running) {
+        goto cleanup;
+    }
+
     // Create EGL window and surface
     app.egl_window = wl_egl_window_create(app.surface, app.width, app.height);
     app.egl_surface = eglCreateWindowSurface(app.egl_display, app.egl_config, (EGLNativeWindowType)app.egl_window, NULL);
@@ -519,22 +539,61 @@ int main(int argc, char *argv[]) {
     struct pollfd pfd = { .fd = wl_fd, .events = POLLIN };
 
     while (running) {
-        while (wl_display_prepare_read(app.display) != 0) {
-            wl_display_dispatch_pending(app.display);
+        if (wl_display_get_error(app.display) != 0) {
+            break;
         }
-        wl_display_flush(app.display);
+
+        while (running && wl_display_prepare_read(app.display) != 0) {
+            if (wl_display_dispatch_pending(app.display) < 0) {
+                running = 0;
+                break;
+            }
+        }
+        if (!running) {
+            wl_display_cancel_read(app.display);
+            break;
+        }
+
+        if (wl_display_flush(app.display) < 0) {
+            if (errno != EAGAIN) {
+                wl_display_cancel_read(app.display);
+                break;
+            }
+        }
 
         int timeout = app.need_render ? 0 : 20;
         int ret = poll(&pfd, 1, timeout);
+        if (!running) {
+            wl_display_cancel_read(app.display);
+            break;
+        }
+
+        if (ret < 0) {
+            wl_display_cancel_read(app.display);
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            wl_display_cancel_read(app.display);
+            break;
+        }
+
         if (ret > 0) {
-            wl_display_read_events(app.display);
-            wl_display_dispatch_pending(app.display);
+            if (wl_display_read_events(app.display) < 0) {
+                break;
+            }
+            if (wl_display_dispatch_pending(app.display) < 0) {
+                break;
+            }
         } else {
             wl_display_cancel_read(app.display);
         }
 
         // Render frame if needed
-        if (app.need_render) {
+        if (app.need_render && running) {
             app.need_render = false;
             uint64_t flags = mpv_render_context_update(app.mpv_gl);
             if (flags & MPV_RENDER_UPDATE_FRAME) {
@@ -556,9 +615,9 @@ int main(int argc, char *argv[]) {
         }
 
         // Handle mpv events
-        while (1) {
+        while (running) {
             mpv_event *event = mpv_wait_event(app.mpv, 0);
-            if (event->event_id == MPV_EVENT_NONE) break;
+            if (!event || event->event_id == MPV_EVENT_NONE) break;
             if (event->event_id == MPV_EVENT_SHUTDOWN) {
                 running = 0;
                 break;
@@ -566,31 +625,93 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Cleanup
-    if (app.mpv_gl) mpv_render_context_free(app.mpv_gl);
-    if (app.mpv) mpv_destroy(app.mpv);
-    if (ipc_socket) unlink(ipc_socket);
-    if (app.egl_surface) eglDestroySurface(app.egl_display, app.egl_surface);
-    if (app.egl_context) eglDestroyContext(app.egl_display, app.egl_context);
-    if (app.egl_display) eglTerminate(app.egl_display);
-    if (app.egl_window) wl_egl_window_destroy(app.egl_window);
-    if (app.layer_surface) zwlr_layer_surface_v1_destroy(app.layer_surface);
-    if (app.xdg_toplevel) xdg_toplevel_destroy(app.xdg_toplevel);
-    if (app.xdg_surface) xdg_surface_destroy(app.xdg_surface);
-    if (app.xdg_wm_base) xdg_wm_base_destroy(app.xdg_wm_base);
-    if (app.layer_shell) zwlr_layer_shell_v1_destroy(app.layer_shell);
-    if (app.surface) wl_surface_destroy(app.surface);
-
-    while (app.outputs) {
-        struct bound_output *next = app.outputs->next;
-        wl_output_destroy(app.outputs->output);
-        free(app.outputs);
-        app.outputs = next;
+cleanup:
+    // Remove IPC socket immediately
+    if (ipc_socket && ipc_socket[0] != '\0') {
+        unlink(ipc_socket);
     }
 
-    if (app.registry) wl_registry_destroy(app.registry);
-    if (app.compositor) wl_compositor_destroy(app.compositor);
-    if (app.display) wl_display_disconnect(app.display);
+    // Shut down MPV cleanly
+    if (app.mpv_gl) {
+        mpv_render_context_set_update_callback(app.mpv_gl, NULL, NULL);
+        mpv_render_context_free(app.mpv_gl);
+        app.mpv_gl = NULL;
+    }
+    if (app.mpv) {
+        mpv_terminate_destroy(app.mpv);
+        app.mpv = NULL;
+    }
+
+    // Release EGL
+    if (app.egl_display != EGL_NO_DISPLAY) {
+        eglMakeCurrent(app.egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (app.egl_surface != EGL_NO_SURFACE) {
+            eglDestroySurface(app.egl_display, app.egl_surface);
+            app.egl_surface = EGL_NO_SURFACE;
+        }
+        if (app.egl_context != EGL_NO_CONTEXT) {
+            eglDestroyContext(app.egl_display, app.egl_context);
+            app.egl_context = EGL_NO_CONTEXT;
+        }
+        eglTerminate(app.egl_display);
+    }
+    if (app.egl_window) {
+        wl_egl_window_destroy(app.egl_window);
+        app.egl_window = NULL;
+    }
+
+    // Release Wayland surfaces and proxies only if display connection is healthy
+    if (app.display && wl_display_get_error(app.display) == 0) {
+        if (app.layer_surface) {
+            zwlr_layer_surface_v1_destroy(app.layer_surface);
+            app.layer_surface = NULL;
+        }
+        if (app.xdg_toplevel) {
+            xdg_toplevel_destroy(app.xdg_toplevel);
+            app.xdg_toplevel = NULL;
+        }
+        if (app.xdg_surface) {
+            xdg_surface_destroy(app.xdg_surface);
+            app.xdg_surface = NULL;
+        }
+        if (app.xdg_wm_base) {
+            xdg_wm_base_destroy(app.xdg_wm_base);
+            app.xdg_wm_base = NULL;
+        }
+        if (app.layer_shell) {
+            wl_proxy_destroy((struct wl_proxy *)app.layer_shell);
+            app.layer_shell = NULL;
+        }
+        if (app.surface) {
+            wl_surface_destroy(app.surface);
+            app.surface = NULL;
+        }
+        while (app.outputs) {
+            struct bound_output *next = app.outputs->next;
+            wl_output_destroy(app.outputs->output);
+            free(app.outputs);
+            app.outputs = next;
+        }
+        if (app.registry) {
+            wl_registry_destroy(app.registry);
+            app.registry = NULL;
+        }
+        if (app.compositor) {
+            wl_compositor_destroy(app.compositor);
+            app.compositor = NULL;
+        }
+    } else {
+        while (app.outputs) {
+            struct bound_output *next = app.outputs->next;
+            free(app.outputs);
+            app.outputs = next;
+        }
+    }
+
+    if (app.display) {
+        wl_display_disconnect(app.display);
+        app.display = NULL;
+    }
 
     return 0;
 }

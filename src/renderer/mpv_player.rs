@@ -123,6 +123,10 @@ impl MpvInstance {
                 debug!("Layer player IPC socket ready at {:?}", self.socket_path);
                 return Ok(());
             }
+            if !self.is_alive() {
+                warn!("Layer player process exited prematurely for monitor {}", self.monitor);
+                break;
+            }
         }
 
         warn!(

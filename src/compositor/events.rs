@@ -2,6 +2,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use super::detection::{detect_desktop_environment, DesktopEnvironment};
+use super::kde::Kde;
 use super::sway::Sway;
 use crate::hyprland::{HyprEvent, Hyprland};
 
@@ -48,6 +49,7 @@ impl CompositorEvents {
                 }))
             }
             DesktopEnvironment::Sway => Sway::start_event_listener(tx),
+            DesktopEnvironment::KdePlasma => Kde::start_event_listener(tx),
             _ => {
                 // Compositor has no specialized event socket or is generic Wayland.
                 // Runs smoothly without needing an event listener.
