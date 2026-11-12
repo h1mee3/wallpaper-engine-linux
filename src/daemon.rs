@@ -210,33 +210,88 @@ impl Daemon {
 
         info!("wengine daemon initialized and waiting for connections");
 
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+
         // IPC Server Loop
-        while let Ok((stream, _)) = listener.accept().await {
-            let state_clone = Arc::clone(&state);
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
+        loop {
+            tokio::select! {
+                accept_res = listener.accept() => {
+                    match accept_res {
+                        Ok((stream, _)) => {
+                            let state_clone = Arc::clone(&state);
+                            let shutdown_tx_clone = shutdown_tx.clone();
+                            tokio::spawn(async move {
+                                let mut reader = BufReader::new(stream);
+                                let mut line = String::new();
 
-                if let Ok(n) = reader.read_line(&mut line).await {
-                    if n == 0 {
-                        return;
+                                if let Ok(n) = reader.read_line(&mut line).await {
+                                    if n == 0 {
+                                        return;
+                                    }
+
+                                    let (resp, should_stop) = match serde_json::from_str::<IpcRequest>(&line) {
+                                        Ok(IpcRequest::Stop) => {
+                                            (IpcResponse::Ok {
+                                                data: json!({"message": "Daemon shutting down"}),
+                                            }, true)
+                                        }
+                                        Ok(req) => (Self::handle_request(state_clone, req).await, false),
+                                        Err(e) => (IpcResponse::Error {
+                                            message: format!("Invalid request JSON: {}", e),
+                                        }, false),
+                                    };
+
+                                    let mut out = serde_json::to_vec(&resp).unwrap_or_default();
+                                    out.push(b'\n');
+                                    let mut stream = reader.into_inner();
+                                    let _ = stream.write_all(&out).await;
+
+                                    if should_stop {
+                                        let _ = shutdown_tx_clone.send(()).await;
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            warn!("Error accepting IPC connection: {}", e);
+                        }
                     }
-
-                    let resp = match serde_json::from_str::<IpcRequest>(&line) {
-                        Ok(req) => Self::handle_request(state_clone, req).await,
-                        Err(e) => IpcResponse::Error {
-                            message: format!("Invalid request JSON: {}", e),
-                        },
-                    };
-
-                    let mut out = serde_json::to_vec(&resp).unwrap_or_default();
-                    out.push(b'\n');
-                    let mut stream = reader.into_inner();
-                    let _ = stream.write_all(&out).await;
                 }
-            });
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM (systemd / stop request), initiating graceful shutdown");
+                    break;
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
+                    break;
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Received IPC Stop command, initiating graceful shutdown");
+                    break;
+                }
+            }
         }
 
+        info!("Shutting down wengine daemon...");
+        _watcher_handle.abort();
+        if let Some(h) = _comp_handle {
+            h.abort();
+        }
+
+        // Cleanly stop all active wallpaper renderers
+        {
+            let mut s = state.lock().await;
+            s.render_manager.stop_all();
+        }
+
+        // Clean up socket file
+        if socket_path.exists() {
+            let _ = std::fs::remove_file(&socket_path);
+        }
+
+        info!("wengine daemon shutdown complete");
         Ok(())
     }
 
@@ -364,6 +419,9 @@ impl Daemon {
                     data: json!({ "total_wallpapers": s.wallpapers.len() }),
                 }
             }
+            IpcRequest::Stop => IpcResponse::Ok {
+                data: json!({ "message": "Stopping daemon" }),
+            },
         }
     }
 }

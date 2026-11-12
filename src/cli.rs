@@ -118,6 +118,9 @@ pub enum Commands {
         monitor: Option<String>,
     },
 
+    /// Stop the background daemon and active wallpaper processes
+    Stop,
+
     /// Launch the official Wallpaper Engine app via Steam
     Steam,
 

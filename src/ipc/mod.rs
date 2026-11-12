@@ -37,6 +37,7 @@ pub enum IpcRequest {
         monitor: Option<String>,
     },
     Rescan,
+    Stop,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
