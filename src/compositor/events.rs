@@ -2,7 +2,9 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use super::detection::{detect_desktop_environment, DesktopEnvironment};
+use super::kde::Kde;
 use super::sway::Sway;
+use super::wayland;
 use crate::hyprland::{HyprEvent, Hyprland};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,11 +50,15 @@ impl CompositorEvents {
                 }))
             }
             DesktopEnvironment::Sway => Sway::start_event_listener(tx),
-            _ => {
-                // Compositor has no specialized event socket or is generic Wayland.
-                // Runs smoothly without needing an event listener.
-                info!("Desktop environment '{}' uses native layer surface management", de.name());
+            DesktopEnvironment::KdePlasma => Kde::start_event_listener(tx),
+            DesktopEnvironment::Unknown => {
+                info!("No active Wayland session detected for event listener");
                 None
+            }
+            _ => {
+                // Universal Wayland event listener (wl_output hotplug + foreign_toplevel fullscreen/window tracking)
+                info!("Starting universal Wayland event listener for {}", de.name());
+                wayland::start_wayland_event_listener(tx)
             }
         }
     }

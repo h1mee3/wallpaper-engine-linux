@@ -273,6 +273,14 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Stop => {
+            match IpcClient::send(IpcRequest::Stop).await {
+                Ok(IpcResponse::Ok { .. }) => {
+                    println!("🛑 Wallpaper Engine Linux daemon stopped successfully.");
+                }
+                _ => eprintln!("⚠️  wengine daemon is not currently running."),
+            }
+        }
         Commands::Steam => {
             println!("🎮 Launching official Wallpaper Engine via Steam...");
             let res = std::process::Command::new("steam")

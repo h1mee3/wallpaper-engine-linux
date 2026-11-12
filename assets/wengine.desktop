@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Wallpaper Engine Linux Layer
+Comment=Restarts Wallpaper Engine daemon on login once the graphical session environment is active
+Exec=systemctl --user restart wengine.service
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-Phase=Initialization

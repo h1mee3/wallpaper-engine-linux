@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -12,6 +14,21 @@ use crate::discovery::{Discovery, Wallpaper};
 use crate::ipc::{get_socket_path, IpcRequest, IpcResponse, PauseMode};
 use crate::renderer::RenderManager;
 use crate::watcher::SteamWatcher;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersistedMonitorState {
+    pub id: String,
+    pub title: String,
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersistedState {
+    pub active_wallpapers: HashMap<String, PersistedMonitorState>,
+    pub scaling_mode: Option<crate::renderer::ScalingMode>,
+    pub volume: Option<u32>,
+    pub muted: Option<bool>,
+}
 
 pub struct DaemonState {
     pub wallpapers: Vec<Wallpaper>,
@@ -46,6 +63,124 @@ impl DaemonState {
             self.monitors = mons;
         }
         info!("Rescanned library: {} wallpapers, {} displays", self.wallpapers.len(), self.monitors.len());
+    }
+
+    /// Save active wallpapers and settings to persistent state (~/.config/wengine/state.json)
+    pub fn save_state(&self) {
+        let config_dir = match dirs::config_dir() {
+            Some(d) => d.join("wengine"),
+            None => return,
+        };
+        let _ = std::fs::create_dir_all(&config_dir);
+        let state_path = config_dir.join("state.json");
+
+        let mut active = HashMap::new();
+        for (mon, wp) in self.render_manager.get_active_wallpapers() {
+            active.insert(
+                mon.clone(),
+                PersistedMonitorState {
+                    id: wp.id.clone(),
+                    title: wp.title.clone(),
+                    path: if wp.is_web() {
+                        wp.resolve_web_path()
+                    } else {
+                        wp.resolve_playable_path()
+                    },
+                },
+            );
+        }
+
+        let state = PersistedState {
+            active_wallpapers: active,
+            scaling_mode: Some(self.render_manager.scaling_mode()),
+            volume: Some(self.render_manager.volume()),
+            muted: Some(self.render_manager.is_muted()),
+        };
+
+        if let Ok(json) = serde_json::to_string_pretty(&state) {
+            let _ = std::fs::write(&state_path, json);
+            debug!("Saved wallpaper state to {:?}", state_path);
+        }
+    }
+
+    /// Restore persistent wallpaper state and settings on daemon startup/restart
+    pub async fn restore_state(&mut self) {
+        let state_path = match dirs::config_dir() {
+            Some(d) => d.join("wengine").join("state.json"),
+            None => return,
+        };
+
+        if !state_path.exists() {
+            debug!("No saved state file found at {:?}", state_path);
+            return;
+        }
+
+        let content = match std::fs::read_to_string(&state_path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Could not read state.json: {}", e);
+                return;
+            }
+        };
+
+        let state: PersistedState = match serde_json::from_str(&content) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to parse state.json: {}", e);
+                return;
+            }
+        };
+
+        if let Some(scaling) = state.scaling_mode {
+            let _ = self.render_manager.set_scaling_mode(scaling).await;
+        }
+        if let Some(volume) = state.volume {
+            let _ = self.render_manager.set_volume(volume).await;
+        }
+        if let Some(muted) = state.muted {
+            let _ = self.render_manager.set_mute(muted).await;
+        }
+
+        if state.active_wallpapers.is_empty() {
+            return;
+        }
+
+        info!(
+            "Restoring {} active wallpaper(s) from persistent state",
+            state.active_wallpapers.len()
+        );
+
+        // If Wayland outputs are still initializing during login, poll up to 3 seconds
+        for _ in 0..10 {
+            if !self.monitors.is_empty() {
+                break;
+            }
+            if let Ok(mons) = Compositor::get_monitors() {
+                if !mons.is_empty() {
+                    self.monitors = mons;
+                    break;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        }
+
+        for (mon, saved_wp) in state.active_wallpapers {
+            let mut applied = self.apply_by_query(&saved_wp.id, Some(&mon)).await;
+            if applied.is_err() {
+                applied = self.apply_by_query(&saved_wp.title, Some(&mon)).await;
+            }
+            match applied {
+                Ok(wp) => {
+                    info!("Restored wallpaper '{}' on monitor '{}'", wp.title, mon);
+                }
+                Err(e) => {
+                    warn!(
+                        "Could not restore wallpaper '{}' ({}) on monitor '{}': {}",
+                        saved_wp.title, saved_wp.id, mon, e
+                    );
+                }
+            }
+        }
     }
 
     /// Retrieve the exact resolution and coordinate offset for a monitor
@@ -106,9 +241,9 @@ impl DaemonState {
                 .await?;
         }
 
+        self.save_state();
         // Check if new wallpaper should be auto-paused according to current pause mode
         let _ = self.evaluate_auto_pause().await;
-
         Ok(wp)
     }
 
@@ -131,6 +266,7 @@ impl DaemonState {
         self.render_manager
             .apply_wallpaper(monitor, &wp, w, h, x, y)
             .await?;
+        self.save_state();
         let _ = self.evaluate_auto_pause().await;
         Ok(Some(wp))
     }
@@ -152,6 +288,7 @@ impl DaemonState {
         self.render_manager
             .apply_wallpaper(monitor, &wp, w, h, x, y)
             .await?;
+        self.save_state();
         let _ = self.evaluate_auto_pause().await;
         Ok(Some(wp))
     }
@@ -217,10 +354,19 @@ impl Daemon {
         info!("Starting wengine daemon on {:?} (pause_mode: {:?})", socket_path, initial_pause_mode);
         let listener = UnixListener::bind(&socket_path)?;
 
+        // Ensure Wayland display & session environment are ready (handles SDDM/GDM/systemd login)
+        Compositor::wait_for_wayland_env().await;
+
         // Setup compositor window/layer rules
         Compositor::setup_compositor_rules();
 
         let state = Arc::new(Mutex::new(DaemonState::new(initial_pause_mode)));
+
+        // Restore saved wallpaper state immediately on startup/restart
+        {
+            let mut s = state.lock().await;
+            s.restore_state().await;
+        }
 
         // Start Steam Workshop and config.json watcher
         let state_watcher = Arc::clone(&state);
@@ -269,33 +415,88 @@ impl Daemon {
             let _ = s.evaluate_auto_pause().await;
         }
 
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+
         // IPC Server Loop
-        while let Ok((stream, _)) = listener.accept().await {
-            let state_clone = Arc::clone(&state);
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
+        loop {
+            tokio::select! {
+                accept_res = listener.accept() => {
+                    match accept_res {
+                        Ok((stream, _)) => {
+                            let state_clone = Arc::clone(&state);
+                            let shutdown_tx_clone = shutdown_tx.clone();
+                            tokio::spawn(async move {
+                                let mut reader = BufReader::new(stream);
+                                let mut line = String::new();
 
-                if let Ok(n) = reader.read_line(&mut line).await {
-                    if n == 0 {
-                        return;
+                                if let Ok(n) = reader.read_line(&mut line).await {
+                                    if n == 0 {
+                                        return;
+                                    }
+
+                                    let (resp, should_stop) = match serde_json::from_str::<IpcRequest>(&line) {
+                                        Ok(IpcRequest::Stop) => {
+                                            (IpcResponse::Ok {
+                                                data: json!({"message": "Daemon shutting down"}),
+                                            }, true)
+                                        }
+                                        Ok(req) => (Self::handle_request(state_clone, req).await, false),
+                                        Err(e) => (IpcResponse::Error {
+                                            message: format!("Invalid request JSON: {}", e),
+                                        }, false),
+                                    };
+
+                                    let mut out = serde_json::to_vec(&resp).unwrap_or_default();
+                                    out.push(b'\n');
+                                    let mut stream = reader.into_inner();
+                                    let _ = stream.write_all(&out).await;
+
+                                    if should_stop {
+                                        let _ = shutdown_tx_clone.send(()).await;
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            warn!("Error accepting IPC connection: {}", e);
+                        }
                     }
-
-                    let resp = match serde_json::from_str::<IpcRequest>(&line) {
-                        Ok(req) => Self::handle_request(state_clone, req).await,
-                        Err(e) => IpcResponse::Error {
-                            message: format!("Invalid request JSON: {}", e),
-                        },
-                    };
-
-                    let mut out = serde_json::to_vec(&resp).unwrap_or_default();
-                    out.push(b'\n');
-                    let mut stream = reader.into_inner();
-                    let _ = stream.write_all(&out).await;
                 }
-            });
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM (systemd / stop request), initiating graceful shutdown");
+                    break;
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
+                    break;
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Received IPC Stop command, initiating graceful shutdown");
+                    break;
+                }
+            }
         }
 
+        info!("Shutting down wengine daemon...");
+        _watcher_handle.abort();
+        if let Some(h) = _comp_handle {
+            h.abort();
+        }
+
+        // Cleanly stop all active wallpaper renderers
+        {
+            let mut s = state.lock().await;
+            s.render_manager.stop_all();
+        }
+
+        // Clean up socket file
+        if socket_path.exists() {
+            let _ = std::fs::remove_file(&socket_path);
+        }
+
+        info!("wengine daemon shutdown complete");
         Ok(())
     }
 
@@ -389,18 +590,21 @@ impl Daemon {
             }
             IpcRequest::Volume { value } => {
                 let _ = s.render_manager.set_volume(value).await;
+                s.save_state();
                 IpcResponse::Ok {
                     data: json!({ "volume": value }),
                 }
             }
             IpcRequest::Mute { value } => {
                 let _ = s.render_manager.set_mute(value).await;
+                s.save_state();
                 IpcResponse::Ok {
                     data: json!({ "muted": value }),
                 }
             }
             IpcRequest::Scaling { mode } => {
                 let _ = s.render_manager.set_scaling_mode(mode).await;
+                s.save_state();
                 IpcResponse::Ok {
                     data: json!({ "scaling_mode": mode }),
                 }
@@ -453,6 +657,9 @@ impl Daemon {
                     data: json!({ "total_wallpapers": s.wallpapers.len() }),
                 }
             }
+            IpcRequest::Stop => IpcResponse::Ok {
+                data: json!({ "message": "Stopping daemon" }),
+            },
         }
     }
 }

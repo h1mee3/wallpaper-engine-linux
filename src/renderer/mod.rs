@@ -119,52 +119,125 @@ impl RenderManager {
                     inst.set_pause(true).await?;
                 }
             }
+
+            // Sync desktop background behind transparent interactive web canvas
+            if let Some(ref preview) = wallpaper.preview_path {
+                Self::sync_desktop_wallpaper(monitor, preview);
+            } else if wallpaper.folder_path.join("preview.jpg").exists() {
+                let preview = wallpaper.folder_path.join("preview.jpg");
+                Self::sync_desktop_wallpaper(monitor, &preview);
+            } else if wallpaper.folder_path.join("preview.png").exists() {
+                let preview = wallpaper.folder_path.join("preview.png");
+                Self::sync_desktop_wallpaper(monitor, &preview);
+            }
         } else {
-            // Resolve the best playable media asset (video, animated gif, or high-res image)
-            let playable_file = wallpaper.resolve_playable_path().with_context(|| {
-                format!(
-                    "No playable media found for wallpaper '{}' ({})",
-                    wallpaper.title, wallpaper.id
-                )
-            })?;
+            let de = crate::compositor::Compositor::current_de();
 
-            let audio_file = wallpaper.resolve_audio_path();
-            let scaling = self.global_scaling;
-
-            let needs_new_backend = match self.backends.get(monitor) {
-                Some(PlayerBackend::Video(_)) => false,
-                _ => true,
-            };
-
-            if needs_new_backend {
-                if let Some(mut old) = self.backends.remove(monitor) {
-                    old.stop();
+            if de == crate::compositor::DesktopEnvironment::KdePlasma {
+                // Stop any standalone layer_player instance on this monitor
+                if let Some(mut inst) = self.backends.remove(monitor) {
+                    inst.stop();
                 }
-                self.backends.insert(
-                    monitor.to_string(),
-                    PlayerBackend::Video(MpvInstance::new(monitor, width, height, x, y)),
-                );
-            }
 
-            if let Some(PlayerBackend::Video(ref mut inst)) = self.backends.get_mut(monitor) {
-                inst.update_geometry(width, height, x, y);
-                inst.set_scaling_mode(scaling).await?;
-                inst.set_volume(volume).await?;
-                inst.set_mute(muted).await?;
-                inst.load_file_with_audio(&playable_file, audio_file.as_deref())
-                    .await?;
-                if paused {
-                    inst.set_pause(true).await?;
+                let playable_file = wallpaper.resolve_playable_path().with_context(|| {
+                    format!(
+                        "No playable media found for wallpaper '{}' ({})",
+                        wallpaper.title, wallpaper.id
+                    )
+                })?;
+
+                let scaling_str = match self.global_scaling {
+                    ScalingMode::Fill => "fill",
+                    ScalingMode::Fit => "fit",
+                    ScalingMode::Stretch => "stretch",
+                };
+
+                let is_video = playable_file
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|ext| {
+                        let l = ext.to_lowercase();
+                        l == "mp4" || l == "mkv" || l == "webm" || l == "avi" || l == "mov" || l == "gif"
+                    })
+                    .unwrap_or(false);
+
+                let (vid_path, img_path) = if is_video {
+                    (Some(playable_file.as_path()), wallpaper.preview_path.as_deref())
+                } else {
+                    (None, Some(playable_file.as_path()))
+                };
+
+                crate::compositor::Kde::apply_wallpaper(
+                    monitor,
+                    vid_path,
+                    img_path,
+                    scaling_str,
+                    muted,
+                    volume,
+                )?;
+
+                // Also sync preview to Noctalia if present
+                if let Some(ref preview) = wallpaper.preview_path {
+                    Self::sync_noctalia_wallpaper(monitor, preview);
+                }
+            } else {
+                // Resolve the best playable media asset (video, animated gif, or high-res image)
+                let playable_file = wallpaper.resolve_playable_path().with_context(|| {
+                    format!(
+                        "No playable media found for wallpaper '{}' ({})",
+                        wallpaper.title, wallpaper.id
+                    )
+                })?;
+
+                let audio_file = wallpaper.resolve_audio_path();
+                let scaling = self.global_scaling;
+
+                let needs_new_backend = match self.backends.get(monitor) {
+                    Some(PlayerBackend::Video(_)) => false,
+                    _ => true,
+                };
+
+                if needs_new_backend {
+                    if let Some(mut old) = self.backends.remove(monitor) {
+                        old.stop();
+                    }
+                    self.backends.insert(
+                        monitor.to_string(),
+                        PlayerBackend::Video(MpvInstance::new(monitor, width, height, x, y)),
+                    );
+                }
+
+                if let Some(PlayerBackend::Video(ref mut inst)) = self.backends.get_mut(monitor) {
+                    inst.update_geometry(width, height, x, y);
+                    inst.set_scaling_mode(scaling).await?;
+                    inst.set_volume(volume).await?;
+                    inst.set_mute(muted).await?;
+                    inst.load_file_with_audio(&playable_file, audio_file.as_deref())
+                        .await?;
+                    if paused {
+                        inst.set_pause(true).await?;
+                    }
+                }
+
+                // Also update desktop wallpaper (using high-res image if available, else preview)
+                let is_image = playable_file
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|ext| {
+                        let l = ext.to_lowercase();
+                        l == "jpg" || l == "jpeg" || l == "png" || l == "webp" || l == "bmp"
+                    })
+                    .unwrap_or(false);
+
+                if is_image {
+                    Self::sync_desktop_wallpaper(monitor, &playable_file);
+                } else if let Some(ref preview) = wallpaper.preview_path {
+                    Self::sync_desktop_wallpaper(monitor, preview);
+                } else if wallpaper.folder_path.join("preview.jpg").exists() {
+                    let preview = wallpaper.folder_path.join("preview.jpg");
+                    Self::sync_desktop_wallpaper(monitor, &preview);
                 }
             }
-        }
-
-        // Synchronize desktop preview wallpaper (Noctalia / Compositor)
-        if let Some(ref preview) = wallpaper.preview_path {
-            Self::sync_desktop_wallpaper(monitor, preview);
-        } else if wallpaper.folder_path.join("preview.jpg").exists() {
-            let preview = wallpaper.folder_path.join("preview.jpg");
-            Self::sync_desktop_wallpaper(monitor, &preview);
         }
 
         self.current_wallpapers
@@ -176,7 +249,10 @@ impl RenderManager {
     /// Synchronize wallpaper with the active desktop environment and Noctalia Shell
     fn sync_desktop_wallpaper(monitor: &str, image_path: &Path) {
         crate::compositor::Compositor::sync_wallpaper(monitor, image_path);
+        Self::sync_noctalia_wallpaper(monitor, image_path);
+    }
 
+    fn sync_noctalia_wallpaper(monitor: &str, image_path: &Path) {
         let p_str = image_path.to_string_lossy().to_string();
         debug!("Syncing Noctalia wallpaper on {}: {}", monitor, p_str);
 
@@ -193,6 +269,14 @@ impl RenderManager {
     /// Set scaling mode across all instances
     pub async fn set_scaling_mode(&mut self, mode: ScalingMode) -> Result<()> {
         self.global_scaling = mode;
+        if crate::compositor::Compositor::current_de() == crate::compositor::DesktopEnvironment::KdePlasma {
+            let s = match mode {
+                ScalingMode::Fill => "fill",
+                ScalingMode::Fit => "fit",
+                ScalingMode::Stretch => "stretch",
+            };
+            let _ = crate::compositor::Kde::set_scaling(s);
+        }
         for backend in self.backends.values_mut() {
             if let PlayerBackend::Video(ref mut inst) = backend {
                 inst.set_scaling_mode(mode).await?;
@@ -204,6 +288,9 @@ impl RenderManager {
     /// Pause all running wallpaper instances (e.g. when entering fullscreen or covered by apps)
     pub async fn pause_all(&mut self) -> Result<()> {
         self.global_paused = true;
+        if crate::compositor::Compositor::current_de() == crate::compositor::DesktopEnvironment::KdePlasma {
+            let _ = crate::compositor::Kde::set_paused(true);
+        }
         for (mon, backend) in &mut self.backends {
             debug!("Pausing wallpaper playback on monitor {}", mon);
             backend.set_pause(true).await?;
@@ -214,6 +301,9 @@ impl RenderManager {
     /// Resume all running wallpaper instances
     pub async fn resume_all(&mut self) -> Result<()> {
         self.global_paused = false;
+        if crate::compositor::Compositor::current_de() == crate::compositor::DesktopEnvironment::KdePlasma {
+            let _ = crate::compositor::Kde::set_paused(false);
+        }
         for (mon, backend) in &mut self.backends {
             debug!("Resuming wallpaper playback on monitor {}", mon);
             backend.set_pause(false).await?;
@@ -235,6 +325,9 @@ impl RenderManager {
     /// Set volume across all instances
     pub async fn set_volume(&mut self, volume: u32) -> Result<()> {
         self.global_volume = volume.min(100);
+        if crate::compositor::Compositor::current_de() == crate::compositor::DesktopEnvironment::KdePlasma {
+            let _ = crate::compositor::Kde::set_audio(self.global_muted, self.global_volume);
+        }
         for backend in self.backends.values_mut() {
             backend.set_volume(self.global_volume).await?;
         }
@@ -244,6 +337,9 @@ impl RenderManager {
     /// Set mute across all instances
     pub async fn set_mute(&mut self, mute: bool) -> Result<()> {
         self.global_muted = mute;
+        if crate::compositor::Compositor::current_de() == crate::compositor::DesktopEnvironment::KdePlasma {
+            let _ = crate::compositor::Kde::set_audio(self.global_muted, self.global_volume);
+        }
         for backend in self.backends.values_mut() {
             backend.set_mute(self.global_muted).await?;
         }

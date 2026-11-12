@@ -198,10 +198,22 @@ impl PkgArchive {
             }
 
             // 2d. Check for TEXB block with LZ4-compressed RGBA texture data
-            if let Some(tb_pos) = find_subsequence(&data, b"TEXB") {
-                if let Some(out_bmp) = try_extract_texb_rgba(&data[tb_pos..], dest) {
-                    return Ok(Some(out_bmp));
+            let mut search_pos = 0;
+            let mut best_tb: Option<PathBuf> = None;
+            let mut max_res = 0u64;
+            while let Some(rel_pos) = find_subsequence(&data[search_pos..], b"TEXB") {
+                let tb_pos = search_pos + rel_pos;
+                if let Some((w, h, out_bmp)) = try_extract_texb_rgba(&data[tb_pos..], dest) {
+                    let res = (w as u64) * (h as u64);
+                    if res > max_res {
+                        max_res = res;
+                        best_tb = Some(out_bmp);
+                    }
                 }
+                search_pos = tb_pos + 4;
+            }
+            if let Some(out_bmp) = best_tb {
+                return Ok(Some(out_bmp));
             }
         }
 
@@ -272,29 +284,44 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Try to parse and extract a TEXB block containing raw or LZ4-compressed RGBA data
-fn try_extract_texb_rgba(tb_data: &[u8], dest: &Path) -> Option<PathBuf> {
+fn try_extract_texb_rgba(tb_data: &[u8], dest: &Path) -> Option<(u32, u32, PathBuf)> {
     // Header format: "TEXBxxxx\0" (9 bytes)
     if tb_data.len() < 37 {
         return None;
     }
-    let pos = 9;
-    let _mipmaps = u32::from_le_bytes(tb_data[pos..pos + 4].try_into().ok()?);
-    let _fmt = u32::from_le_bytes(tb_data[pos + 4..pos + 8].try_into().ok()?);
-    let w = u32::from_le_bytes(tb_data[pos + 8..pos + 12].try_into().ok()?);
-    let h = u32::from_le_bytes(tb_data[pos + 12..pos + 16].try_into().ok()?);
-    let _frames = u32::from_le_bytes(tb_data[pos + 16..pos + 20].try_into().ok()?);
-    let uncompressed_size = u32::from_le_bytes(tb_data[pos + 20..pos + 24].try_into().ok()?) as usize;
-    let compressed_size = u32::from_le_bytes(tb_data[pos + 24..pos + 28].try_into().ok()?) as usize;
 
-    let expected_len = (w as usize) * (h as usize) * 4;
-    if uncompressed_size != expected_len || w < 200 || h < 200 {
-        return None;
+    // Supported candidate offsets: (w_off, h_off, unc_off, comp_off, payload_start)
+    // TEXB0003 / TEXB0004: width at 21, height at 25, uncompressed at 33, compressed at 37, payload at 41
+    // TEXB0001 / TEXB0002: width at 17, height at 21, uncompressed at 29, compressed at 33, payload at 37
+    let candidates = [
+        (21, 25, 33, 37, 41),
+        (17, 21, 29, 33, 37),
+    ];
+
+    let mut matched = None;
+    for (w_off, h_off, unc_off, comp_off, data_off) in candidates {
+        if tb_data.len() >= data_off {
+            if let (Some(w_slice), Some(h_slice), Some(unc_slice), Some(comp_slice)) = (
+                tb_data.get(w_off..w_off + 4),
+                tb_data.get(h_off..h_off + 4),
+                tb_data.get(unc_off..unc_off + 4),
+                tb_data.get(comp_off..comp_off + 4),
+            ) {
+                let w = u32::from_le_bytes(w_slice.try_into().unwrap());
+                let h = u32::from_le_bytes(h_slice.try_into().unwrap());
+                let unc = u32::from_le_bytes(unc_slice.try_into().unwrap()) as usize;
+                let comp = u32::from_le_bytes(comp_slice.try_into().unwrap()) as usize;
+
+                let expected_len = (w as usize) * (h as usize) * 4;
+                if unc == expected_len && w >= 200 && h >= 200 && data_off + comp <= tb_data.len() {
+                    matched = Some((w, h, unc, comp, data_off));
+                    break;
+                }
+            }
+        }
     }
 
-    let payload_start = pos + 28;
-    if payload_start + compressed_size > tb_data.len() {
-        return None;
-    }
+    let (w, h, uncompressed_size, compressed_size, payload_start) = matched?;
     let payload = &tb_data[payload_start..payload_start + compressed_size];
 
     let decompressed = if compressed_size == uncompressed_size {
@@ -305,7 +332,7 @@ fn try_extract_texb_rgba(tb_data: &[u8], dest: &Path) -> Option<PathBuf> {
 
     let out_bmp = dest.join("wallpaper.bmp");
     if write_bmp_rgba(&out_bmp, w, h, &decompressed).is_ok() {
-        Some(out_bmp)
+        Some((w, h, out_bmp))
     } else {
         None
     }
@@ -422,4 +449,29 @@ fn write_bmp_rgba(dest_path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
 
     file.write_all(&bgra)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_texb0003() {
+        let pkg_path = Path::new("/hdd/SteamLibrary/steamapps/workshop/content/431960/1897907008/scene.pkg");
+        if pkg_path.exists() {
+            let archive = PkgArchive::open(pkg_path).expect("Failed to open scene.pkg");
+            let temp_dir = std::env::temp_dir().join("test_wengine_texb");
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            std::fs::create_dir_all(&temp_dir).unwrap();
+
+            let asset = archive.extract_playable_asset(&temp_dir).expect("Extraction failed");
+            assert!(asset.is_some(), "Expected extracted asset");
+            let bmp_path = asset.unwrap();
+            assert!(bmp_path.exists(), "Extracted BMP should exist");
+            assert_eq!(bmp_path.file_name().unwrap(), "wallpaper.bmp");
+            let meta = std::fs::metadata(&bmp_path).unwrap();
+            assert!(meta.len() > 1000000, "BMP should be large high-res asset");
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+    }
 }

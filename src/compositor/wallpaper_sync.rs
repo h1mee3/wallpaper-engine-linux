@@ -29,20 +29,15 @@ impl WallpaperSync {
                 info!("Synced wallpaper with GNOME background via gsettings");
             }
             DesktopEnvironment::KdePlasma => {
-                // KDE Plasma allows setting wallpaper via dbus evaluateScript
+                // Ensure native wengine wallpaper plugin is installed
+                let _ = super::kde::Kde::ensure_wallpaper_plugin();
                 let script = format!(
-                    r#"for (let d of desktops()) {{ d.wallpaperPlugin = "org.kde.image"; d.currentConfigGroup = Array("Wallpaper", "org.kde.image", "General"); d.writeConfig("Image", "file://{}"); }}"#,
-                    path_str
+                    r#"var d = desktops(); for (var i = 0; i < d.length; i++) {{ d[i].wallpaperPlugin = "{plugin}"; d[i].currentConfigGroup = ["Wallpaper", "{plugin}", "General"]; d[i].writeConfig("VideoPath", ""); d[i].writeConfig("ImagePath", "file://{path}"); d[i].reloadConfig(); }}"#,
+                    plugin = super::kde::Kde::PLUGIN_ID,
+                    path = path_str
                 );
-                let _ = Command::new("qdbus")
-                    .args([
-                        "org.kde.plasmashell",
-                        "/PlasmaShell",
-                        "org.kde.PlasmaShell.evaluateScript",
-                        &script,
-                    ])
-                    .output();
-                info!("Synced wallpaper with KDE Plasma via DBus");
+                let _ = super::kde::Kde::evaluate_script(&script);
+                info!("Synced static wallpaper with KDE Plasma via DBus");
             }
             DesktopEnvironment::Sway => {
                 let mon_arg = if monitor == "*" { "*" } else { monitor };

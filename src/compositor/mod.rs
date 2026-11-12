@@ -1,6 +1,7 @@
 pub mod detection;
 pub mod drm;
 pub mod events;
+pub mod kde;
 pub mod monitor;
 pub mod sway;
 pub mod wallpaper_sync;
@@ -11,6 +12,7 @@ use tracing::{debug, info, warn};
 
 pub use detection::{detect_desktop_environment, DesktopEnvironment};
 pub use events::{CompositorEvent, CompositorEvents};
+pub use kde::Kde;
 pub use monitor::Monitor;
 pub use wallpaper_sync::WallpaperSync;
 
@@ -57,7 +59,23 @@ impl Compositor {
                     }
                 }
             }
+            DesktopEnvironment::KdePlasma => {
+                if let Ok(mons) = Kde::get_monitors() {
+                    if !mons.is_empty() {
+                        return Ok(mons);
+                    }
+                }
+            }
             _ => {}
+        }
+
+        // Try kscreen-doctor only if running on KDE Plasma to prevent core dumps without a display
+        if de == DesktopEnvironment::KdePlasma {
+            if let Ok(mons) = Kde::get_monitors() {
+                if !mons.is_empty() {
+                    return Ok(mons);
+                }
+            }
         }
 
         // Try swaymsg anyway if available
@@ -118,12 +136,24 @@ impl Compositor {
         WallpaperSync::sync_desktop(monitor, image_path);
     }
 
+    /// Ensure Wayland display environment variables are populated
+    pub fn ensure_wayland_env() -> bool {
+        detection::ensure_wayland_env()
+    }
+
+    /// Wait for Wayland display socket at session startup (e.g. SDDM/GDM/systemd login)
+    pub async fn wait_for_wayland_env() -> bool {
+        detection::wait_for_wayland_env().await
+    }
+
     /// Check whether any application windows are above the wallpaper or in fullscreen mode
     pub fn check_apps_above() -> (bool, bool) {
         let de = detect_desktop_environment();
         match de {
             DesktopEnvironment::Hyprland => Hyprland::check_apps_above(),
-            _ => (false, false),
+            DesktopEnvironment::Sway => sway::Sway::check_apps_above(),
+            DesktopEnvironment::KdePlasma => Kde::check_apps_above(),
+            _ => wayland::query_foreign_toplevels().unwrap_or((false, false)),
         }
     }
 }
