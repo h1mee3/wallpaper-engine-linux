@@ -119,6 +119,17 @@ impl RenderManager {
                     inst.set_pause(true).await?;
                 }
             }
+
+            // Sync desktop background behind transparent interactive web canvas
+            if let Some(ref preview) = wallpaper.preview_path {
+                Self::sync_desktop_wallpaper(monitor, preview);
+            } else if wallpaper.folder_path.join("preview.jpg").exists() {
+                let preview = wallpaper.folder_path.join("preview.jpg");
+                Self::sync_desktop_wallpaper(monitor, &preview);
+            } else if wallpaper.folder_path.join("preview.png").exists() {
+                let preview = wallpaper.folder_path.join("preview.png");
+                Self::sync_desktop_wallpaper(monitor, &preview);
+            }
         } else {
             let de = crate::compositor::Compositor::current_de();
 
