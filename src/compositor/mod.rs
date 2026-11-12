@@ -69,10 +69,12 @@ impl Compositor {
             _ => {}
         }
 
-        // Try kscreen-doctor anyway if available
-        if let Ok(mons) = Kde::get_monitors() {
-            if !mons.is_empty() {
-                return Ok(mons);
+        // Try kscreen-doctor only if running on KDE Plasma to prevent core dumps without a display
+        if de == DesktopEnvironment::KdePlasma {
+            if let Ok(mons) = Kde::get_monitors() {
+                if !mons.is_empty() {
+                    return Ok(mons);
+                }
             }
         }
 

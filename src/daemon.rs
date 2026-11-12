@@ -1,17 +1,34 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::compositor::{Compositor, CompositorEvent, Monitor};
 use crate::discovery::{Discovery, Wallpaper};
 use crate::ipc::{get_socket_path, IpcRequest, IpcResponse};
 use crate::renderer::RenderManager;
 use crate::watcher::SteamWatcher;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersistedMonitorState {
+    pub id: String,
+    pub title: String,
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersistedState {
+    pub active_wallpapers: HashMap<String, PersistedMonitorState>,
+    pub scaling_mode: Option<crate::renderer::ScalingMode>,
+    pub volume: Option<u32>,
+    pub muted: Option<bool>,
+}
 
 pub struct DaemonState {
     pub wallpapers: Vec<Wallpaper>,
@@ -42,6 +59,120 @@ impl DaemonState {
             self.monitors = mons;
         }
         info!("Rescanned library: {} wallpapers, {} displays", self.wallpapers.len(), self.monitors.len());
+    }
+
+    /// Save active wallpapers and settings to persistent state (~/.config/wengine/state.json)
+    pub fn save_state(&self) {
+        let config_dir = match dirs::config_dir() {
+            Some(d) => d.join("wengine"),
+            None => return,
+        };
+        let _ = std::fs::create_dir_all(&config_dir);
+        let state_path = config_dir.join("state.json");
+
+        let mut active = HashMap::new();
+        for (mon, wp) in self.render_manager.get_active_wallpapers() {
+            active.insert(
+                mon.clone(),
+                PersistedMonitorState {
+                    id: wp.id.clone(),
+                    title: wp.title.clone(),
+                    path: wp.resolve_playable_path(),
+                },
+            );
+        }
+
+        let state = PersistedState {
+            active_wallpapers: active,
+            scaling_mode: Some(self.render_manager.scaling_mode()),
+            volume: Some(self.render_manager.volume()),
+            muted: Some(self.render_manager.is_muted()),
+        };
+
+        if let Ok(json) = serde_json::to_string_pretty(&state) {
+            let _ = std::fs::write(&state_path, json);
+            debug!("Saved wallpaper state to {:?}", state_path);
+        }
+    }
+
+    /// Restore persistent wallpaper state and settings on daemon startup/restart
+    pub async fn restore_state(&mut self) {
+        let state_path = match dirs::config_dir() {
+            Some(d) => d.join("wengine").join("state.json"),
+            None => return,
+        };
+
+        if !state_path.exists() {
+            debug!("No saved state file found at {:?}", state_path);
+            return;
+        }
+
+        let content = match std::fs::read_to_string(&state_path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Could not read state.json: {}", e);
+                return;
+            }
+        };
+
+        let state: PersistedState = match serde_json::from_str(&content) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to parse state.json: {}", e);
+                return;
+            }
+        };
+
+        if let Some(scaling) = state.scaling_mode {
+            let _ = self.render_manager.set_scaling_mode(scaling).await;
+        }
+        if let Some(volume) = state.volume {
+            let _ = self.render_manager.set_volume(volume).await;
+        }
+        if let Some(muted) = state.muted {
+            let _ = self.render_manager.set_mute(muted).await;
+        }
+
+        if state.active_wallpapers.is_empty() {
+            return;
+        }
+
+        info!(
+            "Restoring {} active wallpaper(s) from persistent state",
+            state.active_wallpapers.len()
+        );
+
+        // If Wayland outputs are still initializing during login, poll up to 3 seconds
+        for _ in 0..10 {
+            if !self.monitors.is_empty() {
+                break;
+            }
+            if let Ok(mons) = Compositor::get_monitors() {
+                if !mons.is_empty() {
+                    self.monitors = mons;
+                    break;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        }
+
+        for (mon, saved_wp) in state.active_wallpapers {
+            let mut applied = self.apply_by_query(&saved_wp.id, Some(&mon)).await;
+            if applied.is_err() {
+                applied = self.apply_by_query(&saved_wp.title, Some(&mon)).await;
+            }
+            match applied {
+                Ok(wp) => {
+                    info!("Restored wallpaper '{}' on monitor '{}'", wp.title, mon);
+                }
+                Err(e) => {
+                    warn!(
+                        "Could not restore wallpaper '{}' ({}) on monitor '{}': {}",
+                        saved_wp.title, saved_wp.id, mon, e
+                    );
+                }
+            }
+        }
     }
 
     /// Retrieve the exact resolution and coordinate offset for a monitor
@@ -102,6 +233,7 @@ impl DaemonState {
                 .await?;
         }
 
+        self.save_state();
         Ok(wp)
     }
 
@@ -124,6 +256,7 @@ impl DaemonState {
         self.render_manager
             .apply_wallpaper(monitor, &wp, w, h, x, y)
             .await?;
+        self.save_state();
         Ok(Some(wp))
     }
 
@@ -144,6 +277,7 @@ impl DaemonState {
         self.render_manager
             .apply_wallpaper(monitor, &wp, w, h, x, y)
             .await?;
+        self.save_state();
         Ok(Some(wp))
     }
 }
@@ -164,6 +298,12 @@ impl Daemon {
         Compositor::setup_compositor_rules();
 
         let state = Arc::new(Mutex::new(DaemonState::new()));
+
+        // Restore saved wallpaper state immediately on startup/restart
+        {
+            let mut s = state.lock().await;
+            s.restore_state().await;
+        }
 
         // Start Steam Workshop and config.json watcher
         let state_watcher = Arc::clone(&state);
@@ -355,18 +495,21 @@ impl Daemon {
             },
             IpcRequest::Volume { value } => {
                 let _ = s.render_manager.set_volume(value).await;
+                s.save_state();
                 IpcResponse::Ok {
                     data: json!({ "volume": value }),
                 }
             }
             IpcRequest::Mute { value } => {
                 let _ = s.render_manager.set_mute(value).await;
+                s.save_state();
                 IpcResponse::Ok {
                     data: json!({ "muted": value }),
                 }
             }
             IpcRequest::Scaling { mode } => {
                 let _ = s.render_manager.set_scaling_mode(mode).await;
+                s.save_state();
                 IpcResponse::Ok {
                     data: json!({ "scaling_mode": mode }),
                 }

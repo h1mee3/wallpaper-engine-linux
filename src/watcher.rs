@@ -102,6 +102,7 @@ impl SteamWatcher {
         tokio::spawn(async move {
             let mut last_acf_mtime = std::time::SystemTime::UNIX_EPOCH;
             let mut last_applied_paths: HashMap<String, PathBuf> = HashMap::new();
+            let mut is_initial_scan = true;
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(1500));
 
             debug!("Steam and config.json watcher started");
@@ -137,9 +138,17 @@ impl SteamWatcher {
                             // Only trigger if this selection actually changed
                             let prev = last_applied_paths.get(&mon);
                             if prev != Some(&path) {
-                                info!("Steam Wallpaper Engine selected new wallpaper for {}: {:?}", mon, path);
-                                last_applied_paths.insert(mon, path.clone());
+                                last_applied_paths.insert(mon.clone(), path.clone());
 
+                                // On initial startup scan, do not overwrite if a wallpaper was already restored
+                                if is_initial_scan {
+                                    let s = state.lock().await;
+                                    if !s.render_manager.get_active_wallpapers().is_empty() {
+                                        continue;
+                                    }
+                                }
+
+                                info!("Steam Wallpaper Engine selected wallpaper for {}: {:?}", mon, path);
                                 let id_opt = path
                                     .parent()
                                     .and_then(|p| p.file_name())
@@ -157,6 +166,7 @@ impl SteamWatcher {
                         }
                     }
                 }
+                is_initial_scan = false;
             }
         })
     }

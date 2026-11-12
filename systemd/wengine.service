@@ -2,6 +2,7 @@
 Description=Wallpaper Engine Linux Layer (KDE Plasma, Hyprland, Sway, Wayland)
 PartOf=graphical-session.target
 After=graphical-session.target
+After=graphical-session-pre.target
 
 [Service]
 Type=simple
@@ -13,4 +14,4 @@ KillSignal=SIGTERM
 TimeoutStopSec=5s
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
