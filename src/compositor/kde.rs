@@ -48,19 +48,27 @@ impl Kde {
 
     /// Execute a JavaScript snippet in plasmashell via DBus evaluateScript
     pub fn evaluate_script(script: &str) -> Result<String> {
-        let output = Command::new("qdbus")
-            .args(["org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell.evaluateScript", script])
-            .output()
-            .context("Failed to run qdbus evaluateScript")?;
+        let mut last_err = String::new();
+        for attempt in 0..8 {
+            let output = Command::new("qdbus")
+                .args(["org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell.evaluateScript", script])
+                .output()
+                .context("Failed to run qdbus evaluateScript")?;
 
-        if !output.status.success() {
-            anyhow::bail!(
-                "evaluateScript failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            if output.status.success() {
+                return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+            }
+
+            last_err = String::from_utf8_lossy(&output.stderr).to_string();
+            // Retry briefly if plasmashell is still registering on D-Bus during session startup
+            if attempt < 7 && (last_err.contains("does not exist") || last_err.contains("ServiceUnknown") || last_err.contains("Could not connect")) {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                continue;
+            }
+            break;
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        anyhow::bail!("evaluateScript failed: {}", last_err);
     }
 
     /// Apply live video or static wallpaper on KDE Plasma desktops
@@ -308,6 +316,46 @@ for (var i = 0; i < d.length; i++) {{
         }
 
         false
+    }
+
+    /// Check whether any active window is fullscreen or covering the desktop on KDE Plasma / KWin.
+    /// Returns `(has_fullscreen, has_apps_above)`.
+    pub fn check_apps_above() -> (bool, bool) {
+        let mut has_fullscreen = false;
+        let mut has_apps_above = false;
+
+        if let Ok(output) = Command::new("qdbus")
+            .args(["--literal", "org.kde.KWin", "/WindowsRunner", "org.kde.krunner1.Match", ""])
+            .output()
+        {
+            if output.status.success() {
+                let out_str = String::from_utf8_lossy(&output.stdout);
+                for cap in out_str.split('{') {
+                    if let Some(end) = cap.find('}') {
+                        let uuid = format!("{{{}}}", &cap[..end]);
+                        if uuid.len() == 38 {
+                            if let Ok(win_info) = Command::new("qdbus")
+                                .args(["org.kde.KWin", "/KWin", "org.kde.KWin.getWindowInfo", &uuid])
+                                .output()
+                            {
+                                if win_info.status.success() {
+                                    let info_text = String::from_utf8_lossy(&win_info.stdout);
+                                    let is_min = info_text.contains("minimized: true");
+                                    if !is_min {
+                                        has_apps_above = true;
+                                        if info_text.contains("fullscreen: true") {
+                                            has_fullscreen = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (has_fullscreen, has_apps_above)
     }
 
     /// Start listening to KDE Plasma / KWin events (fullscreen auto-pause, display changes)

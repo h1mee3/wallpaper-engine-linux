@@ -354,6 +354,9 @@ impl Daemon {
         info!("Starting wengine daemon on {:?} (pause_mode: {:?})", socket_path, initial_pause_mode);
         let listener = UnixListener::bind(&socket_path)?;
 
+        // Ensure Wayland display & session environment are ready (handles SDDM/GDM/systemd login)
+        Compositor::wait_for_wayland_env().await;
+
         // Setup compositor window/layer rules
         Compositor::setup_compositor_rules();
 
