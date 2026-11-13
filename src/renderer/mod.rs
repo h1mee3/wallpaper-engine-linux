@@ -54,6 +54,7 @@ pub struct RenderManager {
     global_volume: u32,
     global_muted: bool,
     global_scaling: ScalingMode,
+    global_fps: u32,
 }
 
 impl RenderManager {
@@ -65,6 +66,7 @@ impl RenderManager {
             global_volume: 50,
             global_muted: true,
             global_scaling: ScalingMode::Fill,
+            global_fps: 30,
         }
     }
 
@@ -201,14 +203,17 @@ impl RenderManager {
                     if let Some(mut old) = self.backends.remove(monitor) {
                         old.stop();
                     }
+                    let mut mpv = MpvInstance::new(monitor, width, height, x, y);
+                    mpv.max_fps = self.global_fps;
                     self.backends.insert(
                         monitor.to_string(),
-                        PlayerBackend::Video(MpvInstance::new(monitor, width, height, x, y)),
+                        PlayerBackend::Video(mpv),
                     );
                 }
 
                 if let Some(PlayerBackend::Video(ref mut inst)) = self.backends.get_mut(monitor) {
                     inst.update_geometry(width, height, x, y);
+                    inst.max_fps = self.global_fps;
                     inst.set_scaling_mode(scaling).await?;
                     inst.set_volume(volume).await?;
                     inst.set_mute(muted).await?;
@@ -280,6 +285,17 @@ impl RenderManager {
         for backend in self.backends.values_mut() {
             if let PlayerBackend::Video(ref mut inst) = backend {
                 inst.set_scaling_mode(mode).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Set maximum FPS across all video instances
+    pub async fn set_fps(&mut self, fps: u32) -> Result<()> {
+        self.global_fps = fps;
+        for backend in self.backends.values_mut() {
+            if let PlayerBackend::Video(ref mut inst) = backend {
+                inst.set_fps(fps).await?;
             }
         }
         Ok(())
@@ -369,6 +385,11 @@ impl RenderManager {
     /// Current scaling mode
     pub fn scaling_mode(&self) -> ScalingMode {
         self.global_scaling
+    }
+
+    /// Current max FPS limit (0 = unlimited)
+    pub fn fps(&self) -> u32 {
+        self.global_fps
     }
 
     /// Terminate all instances

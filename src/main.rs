@@ -27,19 +27,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon { power_save, pause_mode } => {
+        Commands::Daemon { power_save, pause_mode, fps } => {
             tracing_subscriber::fmt()
                 .with_env_filter("wengine=info")
                 .init();
             let mode = if power_save {
-                ipc::PauseMode::PowerSave
+                Some(ipc::PauseMode::PowerSave)
             } else if let Some(pm) = pause_mode {
-                pm.into()
+                Some(pm.into())
             } else {
-                ipc::PauseMode::Fullscreen
+                None
             };
-            println!("🚀 Starting Wallpaper Engine Linux daemon (Pause Mode: {:?})...", mode);
-            Daemon::run(mode).await?;
+            println!("🚀 Starting Wallpaper Engine Linux daemon...");
+            Daemon::run(mode, fps).await?;
         }
         Commands::List {
             json,
@@ -133,6 +133,18 @@ async fn main() -> Result<()> {
                 _ => eprintln!("⚠️  wengine daemon is not running."),
             }
         }
+        Commands::Fps { fps } => {
+            match IpcClient::send(IpcRequest::SetFps { fps }).await {
+                Ok(IpcResponse::Ok { .. }) => {
+                    if fps == 0 {
+                        println!("🎞️  Video wallpaper FPS limit set to: \x1b[1;32munlimited\x1b[0m");
+                    } else {
+                        println!("🎞️  Video wallpaper FPS limit set to: \x1b[1;32m{} FPS\x1b[0m", fps);
+                    }
+                }
+                _ => eprintln!("⚠️  wengine daemon is not running."),
+            }
+        }
         Commands::PauseMode { mode } => {
             let pm: ipc::PauseMode = mode.into();
             match IpcClient::send(IpcRequest::SetPauseMode { mode: pm }).await {
@@ -187,6 +199,7 @@ async fn main() -> Result<()> {
                         let muted = data.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
                         let total = data.get("total_wallpapers").and_then(|v| v.as_u64()).unwrap_or(0);
                         let scaling = data.get("scaling_mode").and_then(|v| v.as_str()).unwrap_or("fill");
+                        let max_fps = data.get("max_fps").and_then(|v| v.as_u64()).unwrap_or(30);
 
                         let de = data.get("desktop_environment").and_then(|v| v.as_str()).unwrap_or("Wayland");
                         let layer_shell = data.get("supports_layer_shell").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -200,6 +213,11 @@ async fn main() -> Result<()> {
                             println!("   Apps Above: Detected on active workspace");
                         }
                         println!("   Scaling:    \x1b[35;1m{}\x1b[0m (fill / fit / stretch)", scaling);
+                        if max_fps == 0 {
+                            println!("   Max FPS:    \x1b[35;1munlimited\x1b[0m");
+                        } else {
+                            println!("   Max FPS:    \x1b[35;1m{} FPS\x1b[0m", max_fps);
+                        }
                         println!("   Volume:     {}% (Muted: {})", volume, muted);
                         println!("   Library:    {} wallpapers indexed", total);
 

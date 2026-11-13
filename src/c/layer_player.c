@@ -7,6 +7,8 @@
 #include <poll.h>
 #include <signal.h>
 #include <errno.h>
+#include <stdint.h>
+#include <time.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
 #include <EGL/egl.h>
@@ -18,6 +20,12 @@
 #include "xdg-shell.h"
 
 static volatile sig_atomic_t running = 1;
+
+static uint64_t get_monotonic_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
 
 static void sig_handler(int sig) {
     (void)sig;
@@ -304,13 +312,24 @@ static bool init_egl(struct app_state *app) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <video_file> [output_name] [ipc_socket_path]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <video_file> [output_name] [ipc_socket_path] [max_fps]\n", argv[0]);
         return 1;
     }
 
     const char *video_file = argv[1];
     const char *output_name = argc > 2 ? argv[2] : "";
     const char *ipc_socket = argc > 3 ? argv[3] : NULL;
+    int max_fps = 30;
+    if (argc > 4 && argv[4][0] != '\0') {
+        max_fps = atoi(argv[4]);
+        if (max_fps < 0) max_fps = 0;
+    } else {
+        const char *env_fps = getenv("WENGINE_MAX_FPS");
+        if (env_fps && env_fps[0] != '\0') {
+            max_fps = atoi(env_fps);
+            if (max_fps < 0) max_fps = 0;
+        }
+    }
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -480,6 +499,7 @@ int main(int argc, char *argv[]) {
     app.egl_window = wl_egl_window_create(app.surface, app.width, app.height);
     app.egl_surface = eglCreateWindowSurface(app.egl_display, app.egl_config, (EGLNativeWindowType)app.egl_window, NULL);
     eglMakeCurrent(app.egl_display, app.egl_surface, app.egl_surface, app.egl_context);
+    eglSwapInterval(app.egl_display, 0);
 
     // Initialize libmpv
     app.mpv = mpv_create();
@@ -496,10 +516,15 @@ int main(int argc, char *argv[]) {
     mpv_set_option_string(app.mpv, "video-unscaled", "no");
     mpv_set_option_string(app.mpv, "really-quiet", "");
     mpv_set_option_string(app.mpv, "panscan", "1.0");
-    mpv_set_option_string(app.mpv, "scale", "spline36");
-    mpv_set_option_string(app.mpv, "cscale", "spline36");
-    mpv_set_option_string(app.mpv, "dscale", "mitchell");
+    mpv_set_option_string(app.mpv, "scale", "bilinear");
+    mpv_set_option_string(app.mpv, "cscale", "bilinear");
+    mpv_set_option_string(app.mpv, "dscale", "bilinear");
     mpv_set_option_string(app.mpv, "correct-pts", "yes");
+    if (max_fps > 0) {
+        char vf_buf[32];
+        snprintf(vf_buf, sizeof(vf_buf), "fps=%d", max_fps);
+        mpv_set_option_string(app.mpv, "vf", vf_buf);
+    }
 
     if (ipc_socket && strlen(ipc_socket) > 0) {
         unlink(ipc_socket);
@@ -537,6 +562,8 @@ int main(int argc, char *argv[]) {
 
     int wl_fd = wl_display_get_fd(app.display);
     struct pollfd pfd = { .fd = wl_fd, .events = POLLIN };
+    const uint64_t min_frame_interval_ns = (max_fps > 0) ? (1000000000ULL / (uint64_t)max_fps) : 0ULL;
+    uint64_t last_render_ns = 0;
 
     while (running) {
         if (wl_display_get_error(app.display) != 0) {
@@ -561,7 +588,20 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        int timeout = app.need_render ? 0 : 20;
+        int timeout = 50;
+        if (app.need_render) {
+            if (min_frame_interval_ns == 0 || last_render_ns == 0) {
+                timeout = 0;
+            } else {
+                uint64_t now_ns = get_monotonic_ns();
+                uint64_t elapsed_ns = now_ns - last_render_ns;
+                if (elapsed_ns >= min_frame_interval_ns) {
+                    timeout = 0;
+                } else {
+                    timeout = (int)((min_frame_interval_ns - elapsed_ns) / 1000000ULL) + 1;
+                }
+            }
+        }
         int ret = poll(&pfd, 1, timeout);
         if (!running) {
             wl_display_cancel_read(app.display);
@@ -592,25 +632,29 @@ int main(int argc, char *argv[]) {
             wl_display_cancel_read(app.display);
         }
 
-        // Render frame if needed
+        // Render frame if needed and frame pacing interval has elapsed
         if (app.need_render && running) {
-            app.need_render = false;
-            uint64_t flags = mpv_render_context_update(app.mpv_gl);
-            if (flags & MPV_RENDER_UPDATE_FRAME) {
-                mpv_opengl_fbo fbo = {
-                    .fbo = 0,
-                    .w = app.width,
-                    .h = app.height,
-                    .internal_format = 0,
-                };
-                int flip_y = 1;
-                mpv_render_param render_params[] = {
-                    {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
-                    {MPV_RENDER_PARAM_FLIP_Y, &flip_y},
-                    {0}
-                };
-                mpv_render_context_render(app.mpv_gl, render_params);
-                eglSwapBuffers(app.egl_display, app.egl_surface);
+            uint64_t now_ns = get_monotonic_ns();
+            if (min_frame_interval_ns == 0 || last_render_ns == 0 || (now_ns - last_render_ns) >= min_frame_interval_ns) {
+                app.need_render = false;
+                uint64_t flags = mpv_render_context_update(app.mpv_gl);
+                if (flags & MPV_RENDER_UPDATE_FRAME) {
+                    mpv_opengl_fbo fbo = {
+                        .fbo = 0,
+                        .w = app.width,
+                        .h = app.height,
+                        .internal_format = 0,
+                    };
+                    int flip_y = 1;
+                    mpv_render_param render_params[] = {
+                        {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
+                        {MPV_RENDER_PARAM_FLIP_Y, &flip_y},
+                        {0}
+                    };
+                    mpv_render_context_render(app.mpv_gl, render_params);
+                    eglSwapBuffers(app.egl_display, app.egl_surface);
+                    last_render_ns = now_ns;
+                }
             }
         }
 

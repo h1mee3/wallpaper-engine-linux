@@ -68,6 +68,10 @@ pub enum Commands {
         /// Pause policy mode: always, fullscreen, covered, power-save
         #[arg(long)]
         pause_mode: Option<CliPauseMode>,
+
+        /// Maximum video wallpaper FPS (0 = unlimited, default: 30)
+        #[arg(long)]
+        fps: Option<u32>,
     },
 
     /// List all discovered Wallpaper Engine wallpapers
@@ -106,6 +110,12 @@ pub enum Commands {
     Scale {
         /// Scaling mode: fill (crop to fill display, no black bars), fit, stretch
         mode: CliScalingMode,
+    },
+
+    /// Set maximum video wallpaper FPS (0 = unlimited, default: 30)
+    Fps {
+        /// Target FPS limit (e.g. 30, 60, or 0 for unlimited)
+        fps: u32,
     },
 
     /// Set auto-pause and power-saving policy mode (always, fullscreen, power-save)
