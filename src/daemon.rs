@@ -651,6 +651,41 @@ impl Daemon {
                     },
                 }
             }
+            IpcRequest::SyncSteam => {
+                let selections = SteamWatcher::read_current_selections();
+                if selections.is_empty() {
+                    IpcResponse::Error {
+                        message: "No active wallpaper selection found in Steam Wallpaper Engine config.json".to_string(),
+                    }
+                } else {
+                    let mut applied = Vec::new();
+                    let mut last_err = None;
+                    for (mon, path) in selections {
+                        if let Some(id) = SteamWatcher::extract_wallpaper_id(&path) {
+                            let target_mon = SteamWatcher::map_steam_monitor(&mon, &s.monitors);
+                            match s.apply_by_query(&id, target_mon.as_deref()).await {
+                                Ok(wp) => applied.push(json!({
+                                    "id": wp.id,
+                                    "title": wp.title,
+                                    "monitor": target_mon.unwrap_or_else(|| "*".to_string())
+                                })),
+                                Err(e) => {
+                                    last_err = Some(e.to_string());
+                                }
+                            }
+                        }
+                    }
+                    if applied.is_empty() {
+                        IpcResponse::Error {
+                            message: last_err.unwrap_or_else(|| "Failed to match Steam wallpaper selection".to_string()),
+                        }
+                    } else {
+                        IpcResponse::Ok {
+                            data: json!({ "applied": applied }),
+                        }
+                    }
+                }
+            }
             IpcRequest::Rescan => {
                 s.rescan();
                 IpcResponse::Ok {
