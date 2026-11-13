@@ -43,10 +43,12 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, sig_handler);
     signal(SIGINT, sig_handler);
 
+    g_set_prgname("wengine");
     gtk_init(&argc, &argv);
 
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Wallpaper Engine — wengine");
+    gtk_window_set_icon_name(GTK_WINDOW(window), "wengine");
     gtk_window_set_default_size(GTK_WINDOW(window), 1280, 800);
     gtk_widget_set_size_request(window, 860, 560);
     gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const DESKTOP_TEMPLATE: &str = include_str!("../assets/wengine-ui.desktop");
+const APP_ICON_SVG: &str = include_str!("../assets/wengine.svg");
 const RELEASES_API: &str =
     "https://api.github.com/repos/h1mee3/wallpaper-engine-linux/releases/latest";
 
@@ -182,6 +184,8 @@ pub fn apply_update() -> Result<UpdateResult> {
         return Err(anyhow!("Release archive contained no wengine binaries"));
     }
 
+    install_desktop_entry(&install_dir);
+
     Ok(UpdateResult {
         updated: true,
         version: info.latest_version.clone(),
@@ -191,4 +195,29 @@ pub fn apply_update() -> Result<UpdateResult> {
             installed_count, info.latest_version
         ),
     })
+}
+
+fn install_desktop_entry(install_dir: &std::path::Path) {
+    let data_home = dirs::data_local_dir().or_else(|| dirs::home_dir().map(|h| h.join(".local/share")));
+    let Some(data_home) = data_home else {
+        return;
+    };
+
+    let exec_path = install_dir.join("wengine");
+    let desktop_content = DESKTOP_TEMPLATE.replace(
+        "Exec=wengine ui",
+        &format!("Exec={} ui", exec_path.to_string_lossy()),
+    );
+
+    let apps_dir = data_home.join("applications");
+    if std::fs::create_dir_all(&apps_dir).is_ok() {
+        if std::fs::write(apps_dir.join("wengine.desktop"), desktop_content).is_ok() {
+            let _ = Command::new("update-desktop-database").arg(&apps_dir).status();
+        }
+    }
+
+    let icons_dir = data_home.join("icons/hicolor/scalable/apps");
+    if std::fs::create_dir_all(&icons_dir).is_ok() {
+        let _ = std::fs::write(icons_dir.join("wengine.svg"), APP_ICON_SVG);
+    }
 }

@@ -49,6 +49,8 @@ jobs:
           cp target/release/wengine-web-player dist/
           cp target/release/wengine-ui dist/
           chmod +x dist/*
+          cp assets/wengine-ui.desktop dist/wengine.desktop
+          cp assets/wengine.svg dist/wengine.svg
           tar -czf "wengine-${TAG}-linux-x86_64.tar.gz" -C dist .
           cp "wengine-${TAG}-linux-x86_64.tar.gz" "wengine-linux-x86_64.tar.gz"
 
