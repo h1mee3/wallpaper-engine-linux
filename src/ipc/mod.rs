@@ -59,6 +59,7 @@ pub enum IpcRequest {
     Random {
         monitor: Option<String>,
     },
+    SyncSteam,
     Rescan,
     Stop,
 }

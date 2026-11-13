@@ -74,27 +74,101 @@ impl SteamWatcher {
             Err(_) => return results,
         };
 
-        // Format 1: "selectedwallpapers": { "DISPLAY1": { "file": "..." } }
-        if let Some(selected) = parsed.get("selectedwallpapers").and_then(|v| v.as_object()) {
-            for (mon, val) in selected {
+        fn collect_selected(
+            obj: &serde_json::Map<String, Value>,
+            results: &mut Vec<(String, PathBuf)>,
+        ) {
+            for (mon, val) in obj {
                 if let Some(file_str) = val.get("file").and_then(|v| v.as_str()) {
-                    let path = Self::normalize_wine_path(file_str);
-                    results.push((mon.clone(), path));
+                    if !file_str.trim().is_empty() {
+                        let path = SteamWatcher::normalize_wine_path(file_str);
+                        results.push((mon.clone(), path));
+                    }
                 }
             }
         }
 
-        // Format 2: "monitors": [ { "selectedwallpaper": "..." } ]
+        // Format 1: Top-level "selectedwallpapers": { "//./DISPLAY1": { "file": "..." } }
+        if let Some(selected) = parsed.get("selectedwallpapers").and_then(|v| v.as_object()) {
+            collect_selected(selected, &mut results);
+        }
+
+        // Format 2: "steamuser.general.wallpaperconfig.selectedwallpapers"
+        if results.is_empty() {
+            if let Some(selected) = parsed
+                .pointer("/steamuser/general/wallpaperconfig/selectedwallpapers")
+                .and_then(|v| v.as_object())
+            {
+                collect_selected(selected, &mut results);
+            }
+        }
+
+        // Format 3: "monitors": [ { "selectedwallpaper": "..." } ]
         if let Some(monitors) = parsed.get("monitors").and_then(|v| v.as_array()) {
             for (idx, mon) in monitors.iter().enumerate() {
                 if let Some(file_str) = mon.get("selectedwallpaper").and_then(|v| v.as_str()) {
-                    let path = Self::normalize_wine_path(file_str);
-                    results.push((format!("monitor{}", idx), path));
+                    if !file_str.trim().is_empty() {
+                        let path = Self::normalize_wine_path(file_str);
+                        results.push((format!("monitor{}", idx), path));
+                    }
                 }
             }
         }
 
         results
+    }
+
+    /// Extract wallpaper ID (folder name) from a Wallpaper Engine file or directory path
+    pub fn extract_wallpaper_id(path: &std::path::Path) -> Option<String> {
+        let has_ext = path.extension().is_some();
+        let is_project_json = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("project.json"))
+            .unwrap_or(false);
+
+        if is_project_json || has_ext {
+            path.parent()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().to_string())
+        } else {
+            path.file_name()
+                .map(|s| s.to_string_lossy().to_string())
+        }
+    }
+
+    /// Map a Steam Wallpaper Engine display key (e.g. "//./DISPLAY1", "monitor0") to a Wayland monitor
+    pub fn map_steam_monitor(steam_mon: &str, monitors: &[crate::compositor::Monitor]) -> Option<String> {
+        if monitors.len() <= 1 {
+            return None;
+        }
+        let lower = steam_mon.to_ascii_lowercase();
+        // Extract trailing digits (e.g. DISPLAY1 -> 1-based, monitor0 -> 0-based)
+        let digits: String = lower.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<String>().chars().rev().collect();
+        if let Ok(num) = digits.parse::<usize>() {
+            let idx = if lower.contains("display") && num > 0 {
+                num - 1
+            } else {
+                num
+            };
+            return monitors.get(idx).map(|m| m.name.clone());
+        }
+        None
+    }
+
+    /// Read all currently selected wallpapers from Steam Wallpaper Engine's config.json
+    pub fn read_current_selections() -> Vec<(String, PathBuf)> {
+        let (config_targets, _) = Self::get_watch_targets();
+        let mut all = Vec::new();
+        for cfg in config_targets {
+            if let Ok(content) = fs::read_to_string(&cfg) {
+                let selections = Self::parse_config_json(&content);
+                if !selections.is_empty() {
+                    all.extend(selections);
+                }
+            }
+        }
+        all
     }
 
     /// Start the background watcher loop
@@ -160,16 +234,7 @@ impl SteamWatcher {
                                 }
 
                                 info!("Steam Wallpaper Engine selected wallpaper for {}: {:?}", mon, path);
-                                let id_opt = path
-                                    .parent()
-                                    .and_then(|p| p.file_name())
-                                    .map(|s| s.to_string_lossy().to_string())
-                                    .or_else(|| {
-                                        path.file_name()
-                                            .map(|s| s.to_string_lossy().to_string())
-                                    });
-
-                                if let Some(id) = id_opt {
+                                if let Some(id) = Self::extract_wallpaper_id(&path) {
                                     let mut s = state.lock().await;
                                     // On startup, only apply if no wallpaper is currently running
                                     let should_apply = if is_initial {
@@ -179,8 +244,12 @@ impl SteamWatcher {
                                     };
 
                                     if should_apply {
-                                        info!("Steam Wallpaper Engine selected wallpaper for {}: {:?}", mon, path);
-                                        let _ = s.apply_by_query(&id, None).await;
+                                        let target_mon = Self::map_steam_monitor(&mon, &s.monitors);
+                                        info!(
+                                            "Applying Steam Wallpaper Engine selection '{}' for {} (target: {:?})",
+                                            id, mon, target_mon
+                                        );
+                                        let _ = s.apply_by_query(&id, target_mon.as_deref()).await;
                                     }
                                 }
                             }

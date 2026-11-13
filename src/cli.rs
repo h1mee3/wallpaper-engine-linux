@@ -7,7 +7,7 @@ use crate::renderer::ScalingMode;
 #[command(
     name = "wengine",
     author = "hime",
-    version = "0.2.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "Wallpaper Engine Linux Layer for any Wayland DE/WM (Hyprland, Sway, KDE, GNOME, River, Niri, Cosmic, etc.)"
 )]
 pub struct Cli {
@@ -163,6 +163,23 @@ pub enum Commands {
 
     /// Stop the background daemon and active wallpaper processes
     Stop,
+
+    /// Open the graphical Wallpaper Engine selector UI
+    Ui {
+        /// Open in your default web browser instead of the native window
+        #[arg(long)]
+        web: bool,
+    },
+
+    /// Sync and apply the wallpaper currently selected in Steam's Wallpaper Engine
+    SyncSteam,
+
+    /// Check for and install prebuilt updates from GitHub Releases (no cargo rebuild needed)
+    Update {
+        /// Only check if an update is available without installing
+        #[arg(long)]
+        check: bool,
+    },
 
     /// Launch the official Wallpaper Engine app via Steam
     Steam,
