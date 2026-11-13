@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f141b"/>
+      <stop offset="100%" stop-color="#192334"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="55%" stop-color="#2d9cdb"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0.9"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)" stroke="url(#accent)" stroke-width="4"/>
+  <path d="M18 82 Q40 58 64 74 T110 66 L110 100 Q110 112 98 112 L30 112 Q18 112 18 100 Z" fill="url(#wave)" opacity="0.22"/>
+  <path d="M18 90 Q44 70 68 84 T110 78" fill="none" stroke="url(#wave)" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M32 42 L45 80 L64 48 L83 80 L96 42" fill="none" stroke="url(#accent)" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="96" cy="34" r="5" fill="#38bdf8"/>
+</svg>

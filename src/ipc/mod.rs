@@ -44,6 +44,9 @@ pub enum IpcRequest {
     Scaling {
         mode: ScalingMode,
     },
+    SetFps {
+        fps: u32,
+    },
     SetPauseMode {
         mode: PauseMode,
     },

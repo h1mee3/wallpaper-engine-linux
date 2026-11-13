@@ -28,6 +28,8 @@ pub struct PersistedState {
     pub scaling_mode: Option<crate::renderer::ScalingMode>,
     pub volume: Option<u32>,
     pub muted: Option<bool>,
+    pub pause_mode: Option<PauseMode>,
+    pub max_fps: Option<u32>,
 }
 
 pub struct DaemonState {
@@ -95,6 +97,8 @@ impl DaemonState {
             scaling_mode: Some(self.render_manager.scaling_mode()),
             volume: Some(self.render_manager.volume()),
             muted: Some(self.render_manager.is_muted()),
+            pause_mode: Some(self.pause_mode),
+            max_fps: Some(self.render_manager.fps()),
         };
 
         if let Ok(json) = serde_json::to_string_pretty(&state) {
@@ -104,7 +108,7 @@ impl DaemonState {
     }
 
     /// Restore persistent wallpaper state and settings on daemon startup/restart
-    pub async fn restore_state(&mut self) {
+    pub async fn restore_state(&mut self, override_pause_mode: bool, override_fps: bool) {
         let state_path = match dirs::config_dir() {
             Some(d) => d.join("wengine").join("state.json"),
             None => return,
@@ -131,6 +135,16 @@ impl DaemonState {
             }
         };
 
+        if !override_pause_mode {
+            if let Some(pm) = state.pause_mode {
+                self.pause_mode = pm;
+            }
+        }
+        if !override_fps {
+            if let Some(fps) = state.max_fps {
+                let _ = self.render_manager.set_fps(fps).await;
+            }
+        }
         if let Some(scaling) = state.scaling_mode {
             let _ = self.render_manager.set_scaling_mode(scaling).await;
         }
@@ -345,13 +359,14 @@ impl DaemonState {
 pub struct Daemon;
 
 impl Daemon {
-    pub async fn run(initial_pause_mode: PauseMode) -> Result<()> {
+    pub async fn run(initial_pause_mode: Option<PauseMode>, initial_fps: Option<u32>) -> Result<()> {
         let socket_path = get_socket_path();
         if socket_path.exists() {
             let _ = std::fs::remove_file(&socket_path);
         }
 
-        info!("Starting wengine daemon on {:?} (pause_mode: {:?})", socket_path, initial_pause_mode);
+        let pause_mode = initial_pause_mode.unwrap_or(PauseMode::Fullscreen);
+        info!("Starting wengine daemon on {:?} (pause_mode: {:?})", socket_path, pause_mode);
         let listener = UnixListener::bind(&socket_path)?;
 
         // Ensure Wayland display & session environment are ready (handles SDDM/GDM/systemd login)
@@ -360,12 +375,16 @@ impl Daemon {
         // Setup compositor window/layer rules
         Compositor::setup_compositor_rules();
 
-        let state = Arc::new(Mutex::new(DaemonState::new(initial_pause_mode)));
+        let state = Arc::new(Mutex::new(DaemonState::new(pause_mode)));
+        if let Some(fps) = initial_fps {
+            let mut s = state.lock().await;
+            let _ = s.render_manager.set_fps(fps).await;
+        }
 
         // Restore saved wallpaper state immediately on startup/restart
         {
             let mut s = state.lock().await;
-            s.restore_state().await;
+            s.restore_state(initial_pause_mode.is_some(), initial_fps.is_some()).await;
         }
 
         // Start Steam Workshop and config.json watcher
@@ -536,6 +555,7 @@ impl Daemon {
                     "volume": s.render_manager.volume(),
                     "muted": s.render_manager.is_muted(),
                     "scaling_mode": s.render_manager.scaling_mode(),
+                    "max_fps": s.render_manager.fps(),
                     "desktop_environment": Compositor::current_de().name(),
                     "supports_layer_shell": Compositor::current_de().supports_layer_shell(),
                     "active_wallpapers": active,
@@ -567,6 +587,7 @@ impl Daemon {
             IpcRequest::SetPauseMode { mode } => {
                 s.pause_mode = mode;
                 let _ = s.evaluate_auto_pause().await;
+                s.save_state();
                 IpcResponse::Ok {
                     data: json!({
                         "pause_mode": s.pause_mode,
@@ -581,6 +602,7 @@ impl Daemon {
                     PauseMode::Fullscreen
                 };
                 let _ = s.evaluate_auto_pause().await;
+                s.save_state();
                 IpcResponse::Ok {
                     data: json!({
                         "power_save": enabled,
@@ -607,6 +629,13 @@ impl Daemon {
                 s.save_state();
                 IpcResponse::Ok {
                     data: json!({ "scaling_mode": mode }),
+                }
+            }
+            IpcRequest::SetFps { fps } => {
+                let _ = s.render_manager.set_fps(fps).await;
+                s.save_state();
+                IpcResponse::Ok {
+                    data: json!({ "max_fps": fps }),
                 }
             }
             IpcRequest::Next { monitor } => {

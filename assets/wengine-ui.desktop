@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Wallpaper Engine
+GenericName=Live Wallpaper Manager
+Comment=Browse and apply Steam Wallpaper Engine wallpapers on Wayland
+Exec=wengine ui
+Icon=wengine
+Terminal=false
+Categories=Utility;DesktopSettings;GTK;
+Keywords=wallpaper;steam;wayland;background;wengine;
+StartupNotify=true
+StartupWMClass=wengine
