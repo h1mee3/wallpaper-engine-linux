@@ -34,6 +34,7 @@ pub struct MpvInstance {
     pub volume: u32,
     pub muted: bool,
     pub scaling_mode: ScalingMode,
+    pub max_fps: u32,
 }
 
 impl MpvInstance {
@@ -52,6 +53,7 @@ impl MpvInstance {
             volume: 0, // default muted for background wallpaper
             muted: true,
             scaling_mode: ScalingMode::Fill,
+            max_fps: 30,
         }
     }
 
@@ -104,10 +106,12 @@ impl MpvInstance {
             .unwrap_or_default();
 
         let mut cmd = Command::new(bin_path);
+        let fps_str = self.max_fps.to_string();
         cmd.args([
             &file_arg,
             &self.monitor,
             &socket_str,
+            &fps_str,
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -218,6 +222,25 @@ impl MpvInstance {
     pub async fn set_scaling_mode(&mut self, mode: ScalingMode) -> Result<()> {
         self.scaling_mode = mode;
         self.apply_scaling().await?;
+        Ok(())
+    }
+
+    /// Change maximum FPS in real time
+    pub async fn set_fps(&mut self, fps: u32) -> Result<()> {
+        self.max_fps = fps;
+        if !self.socket_path.exists() {
+            return Ok(());
+        }
+        let vf_val = if fps > 0 {
+            format!("fps={}", fps)
+        } else {
+            String::new()
+        };
+        let _ = self
+            .send_command(json!({
+                "command": ["set_property", "vf", vf_val]
+            }))
+            .await;
         Ok(())
     }
 
