@@ -7,6 +7,8 @@ mod ipc;
 mod noctalia;
 mod pkg;
 mod renderer;
+mod ui;
+mod updater;
 mod vdf;
 mod watcher;
 
@@ -279,6 +281,42 @@ async fn main() -> Result<()> {
                     println!("🛑 Wallpaper Engine Linux daemon stopped successfully.");
                 }
                 _ => eprintln!("⚠️  wengine daemon is not currently running."),
+            }
+        }
+        Commands::Ui { web } => {
+            ui::run_ui(web).await?;
+        }
+        Commands::SyncSteam => {
+            match IpcClient::send(IpcRequest::SyncSteam).await? {
+                IpcResponse::Ok { data } => {
+                    if let Some(applied) = data.get("applied").and_then(|v| v.as_array()) {
+                        for item in applied {
+                            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                            let mon = item.get("monitor").and_then(|v| v.as_str()).unwrap_or("*");
+                            println!("🎮 Synced from Steam: \x1b[1;32m{}\x1b[0m (Monitor: {})", title, mon);
+                        }
+                    }
+                }
+                IpcResponse::Error { message } => {
+                    eprintln!("❌ Steam sync failed: {}", message);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Update { check } => {
+            if check {
+                let info = updater::check_for_updates()?;
+                println!("Current version: {}", info.current_version);
+                println!("Latest release:  {}", info.latest_version);
+                if info.update_available {
+                    println!("🚀 Update available! Run `wengine update` to install.");
+                } else {
+                    println!("✅ You are already on the latest version.");
+                }
+            } else {
+                println!("⬇️  Checking and installing latest release from GitHub...");
+                let res = updater::apply_update()?;
+                println!("✅ {}", res.message);
             }
         }
         Commands::Steam => {

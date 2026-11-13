@@ -1,6 +1,6 @@
 [package]
 name = "wengine"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["hime"]
 description = "Wallpaper Engine Linux Layer for any Wayland DE/WM (Hyprland, Sway, KDE, GNOME, River, Niri, Cosmic, etc.)"
